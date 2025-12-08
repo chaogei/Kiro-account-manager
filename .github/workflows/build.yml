@@ -248,6 +248,31 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
+      - name: Deduplicate update metadata files
+        run: |
+          # 保留一个 latest.yml (Windows)
+          find artifacts -name "latest.yml" | head -1 | xargs -I {} cp {} artifacts/latest.yml 2>/dev/null || true
+          find artifacts -path "*/windows-*/*" -name "latest.yml" -delete 2>/dev/null || true
+          
+          # 保留一个 latest-mac.yml (macOS)
+          find artifacts -name "latest-mac.yml" | head -1 | xargs -I {} cp {} artifacts/latest-mac.yml 2>/dev/null || true
+          find artifacts -path "*/macos-*/*" -name "latest-mac.yml" -delete 2>/dev/null || true
+          
+          # 保留一个 latest-linux.yml (Linux)
+          find artifacts -name "latest-linux.yml" | head -1 | xargs -I {} cp {} artifacts/latest-linux.yml 2>/dev/null || true
+          find artifacts -path "*/linux-*/*" -name "latest-linux.yml" -delete 2>/dev/null || true
+          
+          # 保留一个 latest-linux-arm64.yml
+          find artifacts -name "latest-linux-arm64.yml" | head -1 | xargs -I {} cp {} artifacts/latest-linux-arm64.yml 2>/dev/null || true
+          find artifacts -path "*/linux-*/*" -name "latest-linux-arm64.yml" -delete 2>/dev/null || true
+          
+          # 保留一个 latest-linux-armv7l.yml
+          find artifacts -name "latest-linux-armv7l.yml" | head -1 | xargs -I {} cp {} artifacts/latest-linux-armv7l.yml 2>/dev/null || true
+          find artifacts -path "*/linux-*/*" -name "latest-linux-armv7l.yml" -delete 2>/dev/null || true
+          
+          echo "After deduplication:"
+          find artifacts -name "*.yml" -type f
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
