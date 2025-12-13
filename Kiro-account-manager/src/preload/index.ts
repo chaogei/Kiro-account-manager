@@ -82,6 +82,46 @@ const api = {
     }
   },
 
+  // 后台批量检查账号状态（不刷新 Token）
+  backgroundBatchCheck: (accounts: Array<{
+    id: string
+    email: string
+    credentials: {
+      accessToken: string
+      refreshToken?: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      provider?: string
+    }
+    idp?: string
+  }>, concurrency?: number): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
+    return ipcRenderer.invoke('background-batch-check', accounts, concurrency)
+  },
+
+  // 监听后台检查进度
+  onBackgroundCheckProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { completed: number; total: number; success: number; failed: number }): void => {
+      callback(data)
+    }
+    ipcRenderer.on('background-check-progress', handler)
+    return () => {
+      ipcRenderer.removeListener('background-check-progress', handler)
+    }
+  },
+
+  // 监听后台检查结果（单个账号）
+  onBackgroundCheckResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; success: boolean; data?: unknown; error?: string }): void => {
+      callback(data)
+    }
+    ipcRenderer.on('background-check-result', handler)
+    return () => {
+      ipcRenderer.removeListener('background-check-result', handler)
+    }
+  },
+
   // 切换账号 - 写入凭证到本地 SSO 缓存
   switchAccount: (credentials: {
     accessToken: string

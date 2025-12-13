@@ -1351,16 +1351,16 @@ app.whenReady().then(() => {
               return
             }
 
-            // 调用 API 获取用量和订阅信息
-            const [usageRes, subscriptionRes] = await Promise.allSettled([
+            // 调用 API 获取用量、订阅和用户信息（检测封禁状态）
+            const [usageRes, subscriptionRes, userInfoRes] = await Promise.allSettled([
               fetch(KIRO_API_BASE, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
                   'Authorization': `Bearer ${newAccessToken}`,
-                  'X-Operation-Name': 'GetUsage'
+                  'X-Operation-Name': 'GetUserUsageAndLimits'
                 },
-                body: JSON.stringify({})
+                body: JSON.stringify({ isEmailRequired: true, origin: 'KIRO_IDE' })
               }),
               fetch(KIRO_API_BASE, {
                 method: 'POST',
@@ -1370,13 +1370,81 @@ app.whenReady().then(() => {
                   'X-Operation-Name': 'GetSubscription'
                 },
                 body: JSON.stringify({})
+              }),
+              fetch(KIRO_API_BASE, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${newAccessToken}`,
+                  'X-Operation-Name': 'GetUserInfo'
+                },
+                body: JSON.stringify({ origin: 'KIRO_IDE' })
               })
             ])
 
-            const usageData = usageRes.status === 'fulfilled' && usageRes.value.ok 
-              ? await usageRes.value.json() : null
-            const subscriptionData = subscriptionRes.status === 'fulfilled' && subscriptionRes.value.ok 
-              ? await subscriptionRes.value.json() : null
+            // 解析响应
+            let usageData = null
+            let subscriptionData = null
+            let userInfoData = null
+            let status = 'active'
+            let errorMessage: string | undefined
+
+            // 检查用量响应（可能返回封禁错误，状态码 423）
+            if (usageRes.status === 'fulfilled') {
+              const usageResponse = usageRes.value
+              if (usageResponse.ok) {
+                usageData = await usageResponse.json()
+              } else {
+                // 尝试解析错误响应
+                try {
+                  const errorBody = await usageResponse.json()
+                  console.log(`[BackgroundRefresh] Usage API error (${usageResponse.status}):`, errorBody)
+                  if (errorBody.__type?.includes('AccountSuspendedException') || usageResponse.status === 423) {
+                    status = 'error'
+                    errorMessage = errorBody.message || 'AccountSuspendedException: 账号已被封禁'
+                  }
+                } catch {
+                  if (usageResponse.status === 423) {
+                    status = 'error'
+                    errorMessage = 'AccountSuspendedException: 账号已被封禁'
+                  }
+                }
+              }
+            }
+
+            // 检查订阅响应（也可能返回封禁错误）
+            if (subscriptionRes.status === 'fulfilled') {
+              const subResponse = subscriptionRes.value
+              if (subResponse.ok) {
+                subscriptionData = await subResponse.json()
+              } else if (subResponse.status === 423 && status !== 'error') {
+                try {
+                  const errorBody = await subResponse.json()
+                  status = 'error'
+                  errorMessage = errorBody.message || 'AccountSuspendedException: 账号已被封禁'
+                } catch {
+                  status = 'error'
+                  errorMessage = 'AccountSuspendedException: 账号已被封禁'
+                }
+              }
+            }
+
+            // 检查用户信息响应
+            if (userInfoRes.status === 'fulfilled') {
+              const userResponse = userInfoRes.value
+              if (userResponse.ok) {
+                userInfoData = await userResponse.json()
+              } else if (userResponse.status === 423 && status !== 'error') {
+                try {
+                  const errorBody = await userResponse.json()
+                  status = 'error'
+                  errorMessage = errorBody.message || 'AccountSuspendedException: 账号已被封禁'
+                } catch {
+                  status = 'error'
+                  errorMessage = 'AccountSuspendedException: 账号已被封禁'
+                }
+              }
+            }
 
             success++
             completed++
@@ -1390,7 +1458,10 @@ app.whenReady().then(() => {
                 refreshToken: refreshResult.refreshToken,
                 expiresIn: refreshResult.expiresIn,
                 usage: usageData,
-                subscription: subscriptionData
+                subscription: subscriptionData,
+                userInfo: userInfoData,
+                status,
+                errorMessage
               }
             })
           } catch (e) {
@@ -1420,6 +1491,226 @@ app.whenReady().then(() => {
     }
 
     console.log(`[BackgroundRefresh] Completed: ${success} success, ${failed} failed`)
+    return { success: true, completed, successCount: success, failedCount: failed }
+  })
+
+  // IPC: 后台批量检查账号状态（不刷新 Token，只检查状态）
+  ipcMain.handle('background-batch-check', async (_event, accounts: Array<{
+    id: string
+    email: string
+    credentials: {
+      accessToken: string
+      refreshToken?: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      provider?: string
+    }
+    idp?: string
+  }>, concurrency: number = 10) => {
+    console.log(`[BackgroundCheck] Starting batch check for ${accounts.length} accounts, concurrency: ${concurrency}`)
+    
+    let completed = 0
+    let success = 0
+    let failed = 0
+
+    // 串行处理每批
+    for (let i = 0; i < accounts.length; i += concurrency) {
+      const batch = accounts.slice(i, i + concurrency)
+      
+      await Promise.allSettled(
+        batch.map(async (account) => {
+          try {
+            const { accessToken, authMethod, provider } = account.credentials
+            
+            if (!accessToken) {
+              failed++
+              completed++
+              mainWindow?.webContents.send('background-check-result', {
+                id: account.id,
+                success: false,
+                error: '缺少 accessToken'
+              })
+              return
+            }
+
+            // 确定 idp
+            let idp = account.idp || 'BuilderId'
+            if (authMethod === 'social' && provider) {
+              idp = provider
+            }
+
+            // 调用 API 获取用量和用户信息（使用和单个检查一样的 CBOR 格式）
+            const [usageRes, userInfoRes] = await Promise.allSettled([
+              kiroApiRequest<{
+                usageBreakdownList?: Array<{
+                  resourceType?: string
+                  displayName?: string
+                  usageLimit?: number
+                  currentUsage?: number
+                  freeTrialInfo?: {
+                    freeTrialStatus?: string
+                    usageLimit?: number
+                    currentUsage?: number
+                    freeTrialExpiry?: string
+                  }
+                }>
+                nextDateReset?: string
+                subscriptionInfo?: {
+                  subscriptionTitle?: string
+                  type?: string
+                }
+                userInfo?: {
+                  email?: string
+                  userId?: string
+                }
+              }>('GetUserUsageAndLimits', { isEmailRequired: true, origin: 'KIRO_IDE' }, accessToken, idp),
+              kiroApiRequest<{
+                email?: string
+                userId?: string
+                status?: string
+                idp?: string
+              }>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp).catch(() => null)
+            ])
+
+            // 解析响应（kiroApiRequest 直接返回数据或抛出异常）
+            let usageData: {
+              current: number
+              limit: number
+              baseCurrent?: number
+              baseLimit?: number
+              freeTrialCurrent?: number
+              freeTrialLimit?: number
+              freeTrialExpiry?: string
+              nextResetDate?: string
+            } | null = null
+            let subscriptionData: {
+              type: string
+              title: string
+            } | null = null
+            let userInfoData: {
+              email?: string
+              userId?: string
+              status?: string
+            } | null = null
+            let status = 'active'
+            let errorMessage: string | undefined
+
+            // 处理用量响应
+            if (usageRes.status === 'fulfilled') {
+              const rawUsage = usageRes.value
+              // 解析 Credits 使用量（和单个检查一致）
+              const creditUsage = rawUsage.usageBreakdownList?.find(
+                (b) => b.resourceType === 'CREDIT' || b.displayName === 'Credits'
+              )
+              
+              const baseCurrent = creditUsage?.currentUsage ?? 0
+              const baseLimit = creditUsage?.usageLimit ?? 0
+              let freeTrialCurrent = 0
+              let freeTrialLimit = 0
+              let freeTrialExpiry: string | undefined
+              if (creditUsage?.freeTrialInfo?.freeTrialStatus === 'ACTIVE') {
+                freeTrialLimit = creditUsage.freeTrialInfo.usageLimit ?? 0
+                freeTrialCurrent = creditUsage.freeTrialInfo.currentUsage ?? 0
+                freeTrialExpiry = creditUsage.freeTrialInfo.freeTrialExpiry
+              }
+              
+              usageData = {
+                current: baseCurrent + freeTrialCurrent,
+                limit: baseLimit + freeTrialLimit,
+                baseCurrent,
+                baseLimit,
+                freeTrialCurrent,
+                freeTrialLimit,
+                freeTrialExpiry,
+                nextResetDate: rawUsage.nextDateReset
+              }
+
+              // 解析订阅信息（从用量响应中获取）
+              const subscriptionTitle = rawUsage.subscriptionInfo?.subscriptionTitle ?? 'Free'
+              let subscriptionType = 'Free'
+              if (subscriptionTitle.toUpperCase().includes('PRO')) {
+                subscriptionType = 'Pro'
+              } else if (subscriptionTitle.toUpperCase().includes('ENTERPRISE')) {
+                subscriptionType = 'Enterprise'
+              } else if (subscriptionTitle.toUpperCase().includes('TEAMS')) {
+                subscriptionType = 'Teams'
+              }
+              subscriptionData = { type: subscriptionType, title: subscriptionTitle }
+            } else if (usageRes.status === 'rejected') {
+              // API 调用失败（可能是封禁或 Token 过期）
+              const errorMsg = usageRes.reason?.message || String(usageRes.reason)
+              console.log(`[BackgroundCheck] Usage API failed for ${account.email}:`, errorMsg)
+              if (errorMsg.includes('AccountSuspendedException') || errorMsg.includes('423')) {
+                status = 'error'
+                errorMessage = errorMsg
+              } else if (errorMsg.includes('401')) {
+                status = 'expired'
+                errorMessage = 'Token 已过期，请刷新'
+              } else {
+                status = 'error'
+                errorMessage = errorMsg
+              }
+            }
+
+            // 处理用户信息响应
+            if (userInfoRes.status === 'fulfilled' && userInfoRes.value) {
+              const rawUserInfo = userInfoRes.value
+              userInfoData = {
+                email: rawUserInfo.email,
+                userId: rawUserInfo.userId,
+                status: rawUserInfo.status
+              }
+              // 检查用户状态（非 Active 表示异常）
+              if (rawUserInfo.status && rawUserInfo.status !== 'Active' && status !== 'error') {
+                status = 'error'
+                errorMessage = `用户状态异常: ${rawUserInfo.status}`
+              }
+            }
+
+            success++
+            completed++
+
+            // 通知渲染进程更新账号
+            mainWindow?.webContents.send('background-check-result', {
+              id: account.id,
+              success: true,
+              data: {
+                usage: usageData,
+                subscription: subscriptionData,
+                userInfo: userInfoData,
+                status,
+                errorMessage
+              }
+            })
+          } catch (e) {
+            failed++
+            completed++
+            mainWindow?.webContents.send('background-check-result', {
+              id: account.id,
+              success: false,
+              error: e instanceof Error ? e.message : 'Unknown error'
+            })
+          }
+        })
+      )
+
+      // 通知进度
+      mainWindow?.webContents.send('background-check-progress', {
+        completed,
+        total: accounts.length,
+        success,
+        failed
+      })
+
+      // 批次间延迟
+      if (i + concurrency < accounts.length) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+
+    console.log(`[BackgroundCheck] Completed: ${success} success, ${failed} failed`)
     return { success: true, completed, successCount: success, failedCount: failed }
   })
 

@@ -191,6 +191,7 @@ interface AccountsActions {
   refreshExpiredTokensOnly: () => Promise<void>
   triggerBackgroundRefresh: () => Promise<void>
   handleBackgroundRefreshResult: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
+  handleBackgroundCheckResult: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
 
   // 定时自动保存（防止数据丢失）
   startAutoSave: () => void
@@ -1090,35 +1091,39 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   batchCheckStatus: async (ids) => {
     const { accounts, autoRefreshConcurrency } = get()
     
-    // 收集需要检查的账号（使用相同的后台刷新 API）
+    // 收集需要检查的账号（使用批量检查 API，不刷新 Token）
     const accountsToCheck: Array<{
       id: string
       email: string
       credentials: {
-        refreshToken: string
+        accessToken: string
+        refreshToken?: string
         clientId?: string
         clientSecret?: string
         region?: string
         authMethod?: string
-        accessToken?: string
+        provider?: string
       }
+      idp?: string
     }> = []
 
     for (const id of ids) {
       const account = accounts.get(id)
-      if (!account?.credentials.refreshToken) continue
+      if (!account?.credentials.accessToken) continue
       
       accountsToCheck.push({
         id,
         email: account.email,
         credentials: {
+          accessToken: account.credentials.accessToken,
           refreshToken: account.credentials.refreshToken,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
           authMethod: account.credentials.authMethod,
-          accessToken: account.credentials.accessToken
-        }
+          provider: account.credentials.provider
+        },
+        idp: account.idp
       })
     }
 
@@ -1128,8 +1133,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     console.log(`[BatchCheck] Triggering background check for ${accountsToCheck.length} accounts...`)
     
-    // 使用后台刷新 API（会刷新 Token 并获取账号信息，不阻塞 UI）
-    const result = await window.api.backgroundBatchRefresh(accountsToCheck, autoRefreshConcurrency)
+    // 使用后台检查 API（只检查状态，不刷新 Token）
+    const result = await window.api.backgroundBatchCheck(accountsToCheck, autoRefreshConcurrency)
     
     return { 
       success: result.successCount, 
@@ -1157,7 +1162,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         Free: 0,
         Pro: 0,
         Pro_Plus: 0,
-        Enterprise: 0
+        Enterprise: 0,
+        Teams: 0
       },
       byIdp: {
         Google: 0,
@@ -1828,10 +1834,24 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // 处理后台刷新结果（由 App.tsx 调用）
   handleBackgroundRefreshResult: (data) => {
-    const { id, success, data: resultData } = data
+    const { id, success, data: resultData, error } = data
     
     if (!success) {
-      console.log(`[BackgroundRefresh] Account ${id} refresh failed:`, data.error)
+      console.log(`[BackgroundRefresh] Account ${id} refresh failed:`, error)
+      // 更新账号错误状态
+      set((state) => {
+        const accounts = new Map(state.accounts)
+        const account = accounts.get(id)
+        if (account) {
+          accounts.set(id, {
+            ...account,
+            status: 'error',
+            lastError: error,
+            lastCheckedAt: Date.now()
+          })
+        }
+        return { accounts }
+      })
       return
     }
 
@@ -1847,9 +1867,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         refreshToken?: string
         expiresIn?: number
-        usage?: { current?: number; limit?: number }
+        usage?: { current?: number; limit?: number; baseCurrent?: number; baseLimit?: number; freeTrialCurrent?: number; freeTrialLimit?: number; freeTrialExpiry?: string; nextResetDate?: string }
         subscription?: { type?: string; title?: string }
+        userInfo?: { email?: string; userId?: string }
+        status?: string
+        errorMessage?: string
       } | undefined
+
+      // 检测封禁状态
+      const newStatus = refreshData?.status === 'error' ? 'error' as AccountStatus : 'active' as AccountStatus
+      const newError = refreshData?.errorMessage
 
       accounts.set(id, {
         ...account,
@@ -1863,9 +1890,97 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           ...account.usage,
           current: refreshData.usage.current ?? account.usage.current,
           limit: refreshData.usage.limit ?? account.usage.limit,
+          baseCurrent: refreshData.usage.baseCurrent ?? account.usage.baseCurrent,
+          baseLimit: refreshData.usage.baseLimit ?? account.usage.baseLimit,
+          freeTrialCurrent: refreshData.usage.freeTrialCurrent ?? account.usage.freeTrialCurrent,
+          freeTrialLimit: refreshData.usage.freeTrialLimit ?? account.usage.freeTrialLimit,
+          freeTrialExpiry: refreshData.usage.freeTrialExpiry ?? account.usage.freeTrialExpiry,
+          nextResetDate: refreshData.usage.nextResetDate ?? account.usage.nextResetDate,
           lastUpdated: now
         } : account.usage,
-        lastError: undefined
+        email: refreshData?.userInfo?.email || account.email,
+        userId: refreshData?.userInfo?.userId || account.userId,
+        status: newStatus,
+        lastError: newError,
+        lastCheckedAt: now
+      })
+
+      return { accounts }
+    })
+  },
+
+  // 处理后台检查结果（由 App.tsx 调用）
+  handleBackgroundCheckResult: (data: { id: string; success: boolean; data?: unknown; error?: string }) => {
+    const { id, success, data: resultData, error } = data
+    
+    if (!success) {
+      console.log(`[BackgroundCheck] Account ${id} check failed:`, error)
+      set((state) => {
+        const accounts = new Map(state.accounts)
+        const account = accounts.get(id)
+        if (account) {
+          accounts.set(id, {
+            ...account,
+            status: 'error',
+            lastError: error,
+            lastCheckedAt: Date.now()
+          })
+        }
+        return { accounts }
+      })
+      return
+    }
+
+    // 更新账号状态
+    set((state) => {
+      const accounts = new Map(state.accounts)
+      const account = accounts.get(id)
+      
+      if (!account) return state
+
+      const now = Date.now()
+      const checkData = resultData as {
+        usage?: { current?: number; limit?: number; baseCurrent?: number; baseLimit?: number; freeTrialCurrent?: number; freeTrialLimit?: number; freeTrialExpiry?: string; nextResetDate?: string }
+        subscription?: { type?: string; title?: string }
+        userInfo?: { email?: string; userId?: string }
+        status?: string
+        errorMessage?: string
+        needsRefresh?: boolean
+      } | undefined
+
+      // 检测状态
+      let newStatus: AccountStatus = 'active'
+      if (checkData?.status === 'error') {
+        newStatus = 'error'
+      } else if (checkData?.status === 'expired' || checkData?.needsRefresh) {
+        newStatus = 'expired'
+      }
+      const newError = checkData?.errorMessage
+
+      accounts.set(id, {
+        ...account,
+        usage: checkData?.usage ? {
+          ...account.usage,
+          current: checkData.usage.current ?? account.usage.current,
+          limit: checkData.usage.limit ?? account.usage.limit,
+          baseCurrent: checkData.usage.baseCurrent ?? account.usage.baseCurrent,
+          baseLimit: checkData.usage.baseLimit ?? account.usage.baseLimit,
+          freeTrialCurrent: checkData.usage.freeTrialCurrent ?? account.usage.freeTrialCurrent,
+          freeTrialLimit: checkData.usage.freeTrialLimit ?? account.usage.freeTrialLimit,
+          freeTrialExpiry: checkData.usage.freeTrialExpiry ?? account.usage.freeTrialExpiry,
+          nextResetDate: checkData.usage.nextResetDate ?? account.usage.nextResetDate,
+          lastUpdated: now
+        } : account.usage,
+        subscription: checkData?.subscription ? {
+          ...account.subscription,
+          type: (checkData.subscription.type as 'Free' | 'Pro' | 'Enterprise' | 'Teams') ?? account.subscription.type,
+          title: checkData.subscription.title ?? account.subscription.title
+        } : account.subscription,
+        email: checkData?.userInfo?.email || account.email,
+        userId: checkData?.userInfo?.userId || account.userId,
+        status: newStatus,
+        lastError: newError,
+        lastCheckedAt: now
       })
 
       return { accounts }
