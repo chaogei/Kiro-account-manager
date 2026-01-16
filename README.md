@@ -258,17 +258,16 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
-### v1.3.4 (2025-01-15)
+
+### v1.3.3 (2025-01-15)
+- 🍎 **macOS Machine ID Fix**: Fixed the issue where modified machine ID still showed the original ID after refresh
+- 🍎 **macOS Permission Fix**: macOS no longer incorrectly prompts "Admin privileges required"
+- 🔗 **Kiro IDE Sync**: macOS now automatically syncs machine ID to Kiro IDE's machineid file
 - 🔒 **Login Private Mode**: Option to open browser in incognito/private mode when logging in online
 - ⚙️ **Global Setting**: Added "Login Private Mode" toggle in settings page
 - 🔄 **Temporary Toggle**: Login dialog supports temporary private mode toggle (defaults to global setting)
 - 🌐 **Auto Browser Detection**: Automatically detects system default browser and uses corresponding private mode arguments
 - 💻 **Multi-Browser Support**: Supports private mode for Chrome, Edge, Firefox, Brave, Opera
-
-### v1.3.3 (2025-01-05)
-- 🍎 **macOS Machine ID Fix**: Fixed the issue where modified machine ID still showed the original ID after refresh
-- 🍎 **macOS Permission Fix**: macOS no longer incorrectly prompts "Admin privileges required"
-- 🔗 **Kiro IDE Sync**: macOS now automatically syncs machine ID to Kiro IDE's machineid file
 
 ### v1.3.2 (2025-01-02)
 - 🔄 **Auto Refresh Timer Fix**: Fixed the issue where auto refresh timer did not check account info when token is not expired
