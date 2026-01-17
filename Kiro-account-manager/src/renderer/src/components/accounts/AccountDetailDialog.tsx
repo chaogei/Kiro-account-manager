@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom'
-import { X, RefreshCw, User, CreditCard, Key } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { X, RefreshCw, User, CreditCard, Key, Cpu, Loader2, FileText, Image, Hash, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -7,6 +8,17 @@ import type { Account } from '@/types/account'
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+
+interface ModelInfo {
+  id: string
+  name: string
+  description: string
+  inputTypes?: string[]
+  maxInputTokens?: number | null
+  maxOutputTokens?: number | null
+  rateMultiplier?: number
+  rateUnit?: string
+}
 
 interface AccountDetailDialogProps {
   open: boolean
@@ -49,14 +61,38 @@ export function AccountDetailDialog({
   onRefresh,
   isRefreshing
 }: AccountDetailDialogProps) {
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState<string | null>(null)
+  const { maskEmail, maskNickname, privacyMode, usagePrecision } = useAccountsStore()
+  const { t } = useTranslation()
+  const isEn = t('common.unknown') === 'Unknown'
+
+  // 获取账户可用模型
+  useEffect(() => {
+    if (open && account?.credentials?.accessToken) {
+      setModelsLoading(true)
+      setModelsError(null)
+      window.api.accountGetModels(account.credentials.accessToken)
+        .then(result => {
+          if (result.success) {
+            setModels(result.models)
+          } else {
+            setModelsError(result.error || 'Failed to fetch models')
+          }
+        })
+        .catch(err => setModelsError(err.message))
+        .finally(() => setModelsLoading(false))
+    } else {
+      setModels([])
+    }
+  }, [open, account?.credentials?.accessToken])
+
   if (!open || !account) return null
 
   const usage = account.usage
   const subscription = account.subscription
   const credentials = account.credentials
-  const { maskEmail, maskNickname, privacyMode, usagePrecision } = useAccountsStore()
-  const { t } = useTranslation()
-  const isEn = t('common.unknown') === 'Unknown'
 
   // 格式化使用量数值
   const formatUsage = (value: number): string => {
@@ -286,6 +322,92 @@ export function AccountDetailDialog({
                </div>
              </section>
           </div>
+
+          {/* 账户可用模型 */}
+          <section className="space-y-3">
+            <h3 className="flex items-center gap-2 font-bold text-base text-foreground">
+              <Cpu className="h-5 w-5 text-primary" />
+              {isEn ? 'Available Models' : '账户可用模型'}
+              <Badge className="ml-auto bg-primary/10 text-primary border-primary/20">{models.length}</Badge>
+            </h3>
+            <div className="bg-gradient-to-br from-muted/20 to-muted/40 border rounded-xl p-4">
+              {modelsLoading ? (
+                <div className="flex items-center justify-center py-8 text-muted-foreground">
+                  <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                  {isEn ? 'Loading models...' : '加载模型中...'}
+                </div>
+              ) : modelsError ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <p className="text-red-500 text-sm">{modelsError}</p>
+                </div>
+              ) : models.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground text-sm">
+                  {isEn ? 'No models available' : '暂无可用模型'}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[320px] overflow-y-auto pr-1">
+                  {models.map((model, index) => (
+                    <div 
+                      key={model.id} 
+                      className={cn(
+                        "group p-3 bg-background rounded-xl border shadow-sm hover:shadow-md hover:border-primary/30 transition-all duration-200",
+                        index === 0 && "ring-1 ring-primary/20"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <div className={cn(
+                              "w-2 h-2 rounded-full shrink-0",
+                              index === 0 ? "bg-primary animate-pulse" : "bg-muted-foreground/40"
+                            )} />
+                            <code className="text-xs font-bold text-foreground truncate">
+                              {model.id}
+                            </code>
+                          </div>
+                          {model.name && model.name !== model.id && (
+                            <p className="text-[11px] text-primary/80 font-medium mb-1 truncate">{model.name}</p>
+                          )}
+                          <p className="text-[11px] text-muted-foreground line-clamp-2 leading-relaxed">
+                            {model.description || (isEn ? 'No description' : '无描述')}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-2 pt-2 border-t border-border/50">
+                        <div className="flex items-center gap-1.5">
+                          {model.inputTypes?.includes('TEXT') && (
+                            <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-blue-500/10 text-blue-600 dark:text-blue-400 border-0">
+                              <FileText className="h-3 w-3 mr-0.5" />Text
+                            </Badge>
+                          )}
+                          {model.inputTypes?.includes('IMAGE') && (
+                            <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-purple-500/10 text-purple-600 dark:text-purple-400 border-0">
+                              <Image className="h-3 w-3 mr-0.5" />Image
+                            </Badge>
+                          )}
+                          {model.rateMultiplier !== undefined && (
+                            <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-0">
+                              <Zap className="h-3 w-3 mr-0.5" />{model.rateMultiplier}x
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-mono">
+                          <Hash className="h-3 w-3" />
+                          <span className="text-green-600 dark:text-green-400">
+                            {model.maxInputTokens ? (model.maxInputTokens >= 1000000 ? `${(model.maxInputTokens / 1000000).toFixed(0)}M` : `${(model.maxInputTokens / 1000).toFixed(0)}K`) : '-'}
+                          </span>
+                          <span>/</span>
+                          <span className="text-orange-600 dark:text-orange-400">
+                            {model.maxOutputTokens ? (model.maxOutputTokens >= 1000000 ? `${(model.maxOutputTokens / 1000000).toFixed(0)}M` : `${(model.maxOutputTokens / 1000).toFixed(0)}K`) : '-'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
         </div>
       </div>
     </div>,

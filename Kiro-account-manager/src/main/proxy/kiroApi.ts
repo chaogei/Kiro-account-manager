@@ -677,3 +677,104 @@ export async function fetchKiroModels(account: ProxyAccount): Promise<KiroModel[
     return []
   }
 }
+
+// 订阅计划信息
+export interface SubscriptionPlan {
+  name: string  // KIRO_FREE, KIRO_PRO, KIRO_PRO_PLUS, KIRO_POWER
+  qSubscriptionType: string
+  description: {
+    title: string
+    billingInterval: string
+    featureHeader: string
+    features: string[]
+  }
+  pricing: {
+    amount: number
+    currency: string
+  }
+}
+
+// 订阅列表响应
+export interface SubscriptionListResponse {
+  disclaimer?: string[]
+  subscriptionPlans?: SubscriptionPlan[]
+}
+
+// 获取可用订阅列表
+export async function fetchAvailableSubscriptions(account: ProxyAccount): Promise<SubscriptionListResponse> {
+  const url = 'https://codewhisperer.us-east-1.amazonaws.com/listAvailableSubscriptions'
+  
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${account.accessToken}`,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'User-Agent': KIRO_USER_AGENT,
+    'x-amz-user-agent': KIRO_AMZ_USER_AGENT,
+    'x-amzn-codewhisperer-optout-preference': 'OPTIN'
+  }
+
+  try {
+    const response = await fetch(url, { method: 'POST', headers, body: '{}' })
+    
+    if (!response.ok) {
+      console.error('[KiroAPI] ListAvailableSubscriptions failed:', response.status)
+      return {}
+    }
+
+    const data = await response.json()
+    return data
+  } catch (error) {
+    console.error('[KiroAPI] ListAvailableSubscriptions error:', error)
+    return {}
+  }
+}
+
+// 订阅 Token 响应
+export interface SubscriptionTokenResponse {
+  encodedVerificationUrl?: string
+  status?: string
+  token?: string | null
+  message?: string
+}
+
+// 获取订阅管理/支付链接
+export async function fetchSubscriptionToken(
+  account: ProxyAccount,
+  subscriptionType?: string
+): Promise<SubscriptionTokenResponse> {
+  const url = 'https://codewhisperer.us-east-1.amazonaws.com/CreateSubscriptionToken'
+  
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${account.accessToken}`,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'User-Agent': KIRO_USER_AGENT,
+    'x-amz-user-agent': KIRO_AMZ_USER_AGENT,
+    'x-amzn-codewhisperer-optout-preference': 'OPTIN'
+  }
+
+  // clientToken 是必需参数，需要生成 UUID
+  const payload: { provider: string; clientToken: string; subscriptionType?: string } = {
+    provider: 'STRIPE',
+    clientToken: uuidv4()
+  }
+  if (subscriptionType) {
+    payload.subscriptionType = subscriptionType
+  }
+
+  try {
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) })
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      console.error('[KiroAPI] CreateSubscriptionToken failed:', response.status, errorData)
+      return { message: errorData.message || `Request failed with status ${response.status}` }
+    }
+
+    const data = await response.json()
+    return data
+  } catch (error) {
+    console.error('[KiroAPI] CreateSubscriptionToken error:', error)
+    return { message: error instanceof Error ? error.message : 'Unknown error' }
+  }
+}

@@ -561,6 +561,31 @@ const api = {
     return ipcRenderer.invoke('proxy-refresh-models')
   },
 
+  // 获取可用模型列表
+  proxyGetModels: (): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache?: boolean }> => {
+    return ipcRenderer.invoke('proxy-get-models')
+  },
+
+  // 获取账户可用模型列表
+  accountGetModels: (accessToken: string): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }> => {
+    return ipcRenderer.invoke('account-get-models', accessToken)
+  },
+
+  // 获取可用订阅列表
+  accountGetSubscriptions: (accessToken: string): Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }> => {
+    return ipcRenderer.invoke('account-get-subscriptions', accessToken)
+  },
+
+  // 获取订阅管理/支付链接
+  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
+    return ipcRenderer.invoke('account-get-subscription-url', accessToken, subscriptionType)
+  },
+
+  // 在新窗口打开订阅链接
+  openSubscriptionWindow: (url: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('open-subscription-window', url)
+  },
+
   // 保存代理日志
   proxySaveLogs: (logs: Array<{ time: string; path: string; status: number; tokens?: number }>): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('proxy-save-logs', logs)

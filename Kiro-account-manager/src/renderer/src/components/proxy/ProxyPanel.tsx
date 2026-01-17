@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Play, Square, RefreshCw, Copy, Check, Server, Users, Activity, AlertCircle, Globe, Zap, Loader2, FileText, Eye, EyeOff } from 'lucide-react'
+import { Play, Square, RefreshCw, Copy, Check, Server, Users, Activity, AlertCircle, Globe, Zap, Loader2, FileText, Eye, EyeOff, Dices, Cpu } from 'lucide-react'
 import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input, Label, Switch, Badge, Select } from '../ui'
 import { useAccountsStore } from '../../store/accounts'
 import { useTranslation } from '../../hooks/useTranslation'
 import { ProxyLogsDialog } from './ProxyLogsDialog'
+import { ModelsDialog } from './ModelsDialog'
 
 interface ProxyStats {
   totalRequests: number
@@ -47,9 +48,51 @@ export function ProxyPanel() {
   const [syncSuccess, setSyncSuccess] = useState(false)
   const [refreshSuccess, setRefreshSuccess] = useState(false)
   const [showLogsDialog, setShowLogsDialog] = useState(false)
+  const [showModelsDialog, setShowModelsDialog] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [apiKeyFormat, setApiKeyFormat] = useState<'sk' | 'simple' | 'token'>('sk')
+  const [apiKeyCopied, setApiKeyCopied] = useState(false)
+  const [apiKeyGenerated, setApiKeyGenerated] = useState(false)
 
   const accounts = useAccountsStore(state => state.accounts)
+
+  // 生成随机 API Key
+  const generateApiKey = useCallback(() => {
+    const randomHex = (len: number) => {
+      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+      return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+    }
+    
+    let newKey: string
+    switch (apiKeyFormat) {
+      case 'sk':
+        newKey = `sk-${randomHex(48)}`
+        break
+      case 'simple':
+        newKey = `PROXY_KEY_${randomHex(32).toUpperCase()}`
+        break
+      case 'token':
+        newKey = `PROXY_KEY:${randomHex(32)}`
+        break
+      default:
+        newKey = `sk-${randomHex(48)}`
+    }
+    
+    setConfig(prev => ({ ...prev, apiKey: newKey }))
+    window.api.proxyUpdateConfig({ apiKey: newKey })
+    setShowApiKey(true)
+    setApiKeyGenerated(true)
+    setTimeout(() => setApiKeyGenerated(false), 1500)
+  }, [apiKeyFormat])
+
+  // 复制 API Key
+  const copyApiKey = useCallback(() => {
+    if (config.apiKey) {
+      navigator.clipboard.writeText(config.apiKey)
+      setApiKeyCopied(true)
+      setTimeout(() => setApiKeyCopied(false), 1500)
+    }
+  }, [config.apiKey])
 
   // 获取状态
   const fetchStatus = useCallback(async () => {
@@ -313,6 +356,10 @@ export function ProxyPanel() {
               {isRefreshingModels ? <Loader2 className="h-4 w-4 animate-spin" /> : refreshSuccess ? <Check className="h-4 w-4 text-green-500" /> : <RefreshCw className="h-4 w-4" />}
               {isRefreshingModels ? (isEn ? 'Refreshing...' : '刷新中...') : refreshSuccess ? (isEn ? 'Refreshed!' : '已刷新') : (isEn ? 'Refresh Models' : '刷新模型')}
             </Button>
+            <Button onClick={() => setShowModelsDialog(true)} variant="outline" className="gap-2" disabled={!isRunning}>
+              <Cpu className="h-4 w-4" />
+              {isEn ? 'View Models' : '查看模型'}
+            </Button>
           </div>
 
           {/* 错误提示 */}
@@ -344,7 +391,11 @@ export function ProxyPanel() {
                 id="port"
                 type="number"
                 value={config.port}
-                onChange={(e) => setConfig(prev => ({ ...prev, port: parseInt(e.target.value) || 5580 }))}
+                onChange={(e) => {
+                  const newPort = parseInt(e.target.value) || 5580
+                  setConfig(prev => ({ ...prev, port: newPort }))
+                  window.api.proxyUpdateConfig({ port: newPort })
+                }}
                 disabled={isRunning}
               />
             </div>
@@ -355,7 +406,11 @@ export function ProxyPanel() {
                   <Switch
                     id="publicAccess"
                     checked={config.host === '0.0.0.0'}
-                    onCheckedChange={(checked) => setConfig(prev => ({ ...prev, host: checked ? '0.0.0.0' : '127.0.0.1' }))}
+                    onCheckedChange={(checked) => {
+                      const newHost = checked ? '0.0.0.0' : '127.0.0.1'
+                      setConfig(prev => ({ ...prev, host: newHost }))
+                      window.api.proxyUpdateConfig({ host: newHost })
+                    }}
                     disabled={isRunning}
                     className="scale-75"
                   />
@@ -365,7 +420,11 @@ export function ProxyPanel() {
               <Input
                 id="host"
                 value={config.host}
-                onChange={(e) => setConfig(prev => ({ ...prev, host: e.target.value }))}
+                onChange={(e) => {
+                  const newHost = e.target.value
+                  setConfig(prev => ({ ...prev, host: newHost }))
+                  window.api.proxyUpdateConfig({ host: newHost })
+                }}
                 disabled={isRunning}
               />
             </div>
@@ -400,16 +459,35 @@ export function ProxyPanel() {
                   {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </Button>
               </div>
+              <Select
+                value={apiKeyFormat}
+                options={[
+                  { value: 'sk', label: 'sk-xxx' },
+                  { value: 'simple', label: 'PROXY_KEY' },
+                  { value: 'token', label: 'KEY:TOKEN' }
+                ]}
+                onChange={(v) => setApiKeyFormat(v as 'sk' | 'simple' | 'token')}
+                className="w-[130px]"
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={generateApiKey}
+                disabled={isRunning}
+                title={isEn ? 'Generate Random Key' : '随机生成'}
+                className={apiKeyGenerated ? 'border-green-500 text-green-500' : ''}
+              >
+                {apiKeyGenerated ? <Check className="h-4 w-4" /> : <Dices className="h-4 w-4" />}
+              </Button>
               {config.apiKey && (
                 <Button
                   variant="outline"
                   size="icon"
-                  onClick={() => {
-                    navigator.clipboard.writeText(config.apiKey || '')
-                  }}
+                  onClick={copyApiKey}
                   title={isEn ? 'Copy API Key' : '复制 API Key'}
+                  className={apiKeyCopied ? 'border-green-500 text-green-500' : ''}
                 >
-                  <Copy className="h-4 w-4" />
+                  {apiKeyCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                 </Button>
               )}
             </div>
@@ -548,6 +626,14 @@ export function ProxyPanel() {
             <span>{isEn ? 'Claude Compatible' : 'Claude 兼容'}</span>
           </div>
           <div className="flex justify-between">
+            <code className="text-muted-foreground">POST /anthropic/v1/messages</code>
+            <span>{isEn ? 'Claude Code Compatible' : 'Claude Code 兼容'}</span>
+          </div>
+          <div className="flex justify-between">
+            <code className="text-muted-foreground">POST /v1/messages/count_tokens</code>
+            <span>{isEn ? 'Token Count' : 'Token 计数'}</span>
+          </div>
+          <div className="flex justify-between">
             <code className="text-muted-foreground">GET /v1/models</code>
             <span>{isEn ? 'Model List' : '模型列表'}</span>
           </div>
@@ -665,6 +751,13 @@ export function ProxyPanel() {
           setRecentLogs([])
           window.api.proxySaveLogs([])
         }}
+        isEn={isEn}
+      />
+
+      {/* 模型列表弹窗 */}
+      <ModelsDialog
+        open={showModelsDialog}
+        onOpenChange={setShowModelsDialog}
         isEn={isEn}
       />
     </div>

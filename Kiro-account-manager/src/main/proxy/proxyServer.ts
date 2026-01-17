@@ -203,6 +203,57 @@ export class ProxyServer {
     console.log('[ProxyServer] Model cache cleared')
   }
 
+  // 获取可用模型列表
+  async getAvailableModels(): Promise<{ models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache: boolean }> {
+    const now = Date.now()
+    
+    // 检查缓存
+    if (this.modelCache && (now - this.modelCache.timestamp) < this.MODEL_CACHE_TTL) {
+      return {
+        models: this.modelCache.models.map(m => ({
+          id: m.modelId,
+          name: m.modelName,
+          description: m.description,
+          inputTypes: m.supportedInputTypes,
+          maxInputTokens: m.tokenLimits?.maxInputTokens,
+          maxOutputTokens: m.tokenLimits?.maxOutputTokens,
+          rateMultiplier: m.rateMultiplier,
+          rateUnit: m.rateUnit
+        })),
+        fromCache: true
+      }
+    }
+
+    // 获取一个可用账号来请求模型列表
+    const account = this.accountPool.getNextAccount()
+    if (!account) {
+      return { models: [], fromCache: false }
+    }
+
+    try {
+      const kiroModels = await fetchKiroModels(account)
+      if (kiroModels.length > 0) {
+        this.modelCache = { models: kiroModels, timestamp: now }
+      }
+      return {
+        models: kiroModels.map(m => ({
+          id: m.modelId,
+          name: m.modelName,
+          description: m.description,
+          inputTypes: m.supportedInputTypes,
+          maxInputTokens: m.tokenLimits?.maxInputTokens,
+          maxOutputTokens: m.tokenLimits?.maxOutputTokens,
+          rateMultiplier: m.rateMultiplier,
+          rateUnit: m.rateUnit
+        })),
+        fromCache: false
+      }
+    } catch (error) {
+      console.error('[ProxyServer] Failed to fetch models:', error)
+      return { models: [], fromCache: false }
+    }
+  }
+
   // 检查 Token 是否需要刷新
   private isTokenExpiringSoon(account: ProxyAccount): boolean {
     if (!account.expiresAt) return false
@@ -395,20 +446,31 @@ export class ProxyServer {
     }
 
     try {
-      // 路由
-      if (path === '/v1/models' || path === '/models') {
+      // 路由（移除查询参数）
+      const pathWithoutQuery = path.split('?')[0]
+      
+      if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
         await this.handleModels(res)
-      } else if (path === '/v1/chat/completions' || path === '/chat/completions') {
+      } else if (pathWithoutQuery === '/v1/chat/completions' || pathWithoutQuery === '/chat/completions') {
         await this.handleOpenAIChat(req, res)
-      } else if (path === '/v1/messages' || path === '/messages') {
+      } else if (pathWithoutQuery === '/v1/messages' || pathWithoutQuery === '/messages' || pathWithoutQuery === '/anthropic/v1/messages') {
         await this.handleClaudeMessages(req, res)
-      } else if (path === '/health' || path === '/') {
+      } else if (pathWithoutQuery === '/v1/messages/count_tokens' || pathWithoutQuery === '/messages/count_tokens') {
+        // Claude Code token 计数端点 - 返回模拟响应
+        this.handleCountTokens(req, res)
+      } else if (pathWithoutQuery === '/api/event_logging/batch') {
+        // Claude Code 遥测端点 - 直接返回 200 OK
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'ok' }))
+      } else if (pathWithoutQuery === '/health' || pathWithoutQuery === '/') {
         this.handleHealth(res)
-      } else if (path.startsWith('/admin/')) {
+      } else if (pathWithoutQuery.startsWith('/admin/')) {
         // 管理 API 端点
-        await this.handleAdminApi(req, res, path)
+        await this.handleAdminApi(req, res, pathWithoutQuery)
       } else {
-        this.sendError(res, 404, 'Not Found')
+        // 记录未知路径以便调试
+        console.log(`[ProxyServer] Unknown path: ${path} (method: ${method})`)
+        this.sendError(res, 404, `Not Found: ${pathWithoutQuery}`)
       }
     } catch (error) {
       console.error('[ProxyServer] Request error:', error)
@@ -518,8 +580,9 @@ export class ProxyServer {
   // 设置 CORS 头
   private setCorsHeaders(res: http.ServerResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch')
+    res.setHeader('Access-Control-Expose-Headers', 'x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens')
   }
 
   // 健康检查
@@ -539,6 +602,38 @@ export class ProxyServer {
         uptime: Date.now() - stats.startTime
       }
     }))
+  }
+
+  // Claude Code token 计数（模拟响应）
+  private async handleCountTokens(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const body = await this.readBody(req)
+      const request = JSON.parse(body)
+      // 简单估算 token 数量（每4个字符约1个token）
+      let totalChars = 0
+      if (request.messages) {
+        for (const msg of request.messages) {
+          if (typeof msg.content === 'string') {
+            totalChars += msg.content.length
+          } else if (Array.isArray(msg.content)) {
+            for (const part of msg.content) {
+              if (part.type === 'text' && part.text) {
+                totalChars += part.text.length
+              }
+            }
+          }
+        }
+      }
+      if (request.system) {
+        totalChars += typeof request.system === 'string' ? request.system.length : JSON.stringify(request.system).length
+      }
+      const estimatedTokens = Math.ceil(totalChars / 4)
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ input_tokens: estimatedTokens }))
+    } catch (error) {
+      this.sendError(res, 400, 'Invalid request body')
+    }
   }
 
   // 模型列表缓存

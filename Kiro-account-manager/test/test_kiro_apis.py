@@ -12,10 +12,13 @@ import json
 import sys
 
 # API 基础 URL
+# SDK 使用的 endpoint 是 https://q.us-east-1.amazonaws.com
+# 但 codewhisperer 端点也应该工作
 BASE_URL = "https://codewhisperer.us-east-1.amazonaws.com"
+Q_BASE_URL = "https://q.us-east-1.amazonaws.com"
 
 # 请在这里填入你的 Access Token
-ACCESS_TOKEN = "aoaAAAAAGlq6cYp3k8U77cJ5XIuYUM2edG8ltPn8Theu3FLG4hKzCT96vKb_VMRx1E14pP0iBukLSGA04BBnz5X7QBkc0:MGQCMBKZvgKladdqqg+4RZp1THGD81uAxnECEi6DtdMZLMvfPzbPvwZQz4IEeMkmzm8NSQIwYmo2WbzdUXhhuHGXItj44enmSnAKR1SifmNUHiMugxjn18zu15Xl4PaXeXTe8fTk"
+ACCESS_TOKEN = "aoaAAAAAGlrshs50x0CL6_dxY2IFGtph5p504T1psy2lmhCrxenO03IHpe4o1r71vBUqHGe7xcV3MY6mSRW8zkpNsBkc0:MGUCMA/OP4ypxKWFuBlvCsXR3rUi6imzOvzqRCehw7lHRiqq30qiXsz2mgpXc64fka1+jAIxAOdSOE0tgyMeHAYginufeT24ExSu4nKeZ9PW/WIslUGumE+eP/FVpuh+6yT03XB9ug"
 
 
 def get_headers():
@@ -113,23 +116,31 @@ def test_list_available_subscriptions():
         return None
 
 
-def test_create_subscription_token(subscription_type: str = None):
+def test_create_subscription_token(subscription_type: str = None, with_client_token: bool = False, use_q_endpoint: bool = False):
     """
     测试 CreateSubscriptionToken API
     端点: POST /CreateSubscriptionToken
     
-    根据源码，只需要 provider 参数，subscriptionType 可选
+    根据源码，clientToken 是必需参数（SDK 自动生成 UUID）
     """
+    import uuid
     type_str = f", type={subscription_type}" if subscription_type else ""
-    print(f"\n🔍 测试 CreateSubscriptionToken API (provider=STRIPE{type_str})...")
+    token_str = ", clientToken=UUID" if with_client_token else ""
+    endpoint_str = " [Q endpoint]" if use_q_endpoint else ""
+    print(f"\n🔍 测试 CreateSubscriptionToken API (provider=STRIPE{type_str}{token_str}){endpoint_str}...")
     
-    url = f"{BASE_URL}/CreateSubscriptionToken"
-    # 根据源码: { provider: "STRIPE", subscriptionType? }
+    base = Q_BASE_URL if use_q_endpoint else BASE_URL
+    url = f"{base}/CreateSubscriptionToken"
     payload = {
         "provider": "STRIPE"
     }
+    if with_client_token:
+        payload["clientToken"] = str(uuid.uuid4())
     if subscription_type:
         payload["subscriptionType"] = subscription_type
+    
+    print(f"📦 URL: {url}")
+    print(f"📦 Payload: {payload}")
     
     try:
         response = requests.post(url, headers=get_headers(), json=payload)
@@ -260,7 +271,10 @@ def main():
     
     # 5. CreateSubscriptionToken
     test_create_subscription_token()  # 不带 subscriptionType
-    test_create_subscription_token("KIRO_PRO")  # 带 subscriptionType
+    test_create_subscription_token("KIRO_PRO")  # 带 subscriptionType (name)
+    test_create_subscription_token("KIRO_PRO", with_client_token=True)  # 带 clientToken
+    test_create_subscription_token("Q_DEVELOPER_STANDALONE_PRO", with_client_token=True)  # 尝试 qSubscriptionType
+    test_create_subscription_token("KIRO_PRO", with_client_token=True, use_q_endpoint=True)  # 使用 Q endpoint
     
     # 6. 额外: ListFeatureEvaluations
     test_list_feature_evaluations()

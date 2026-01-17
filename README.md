@@ -270,6 +270,26 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ---
 
 ## 📋 Changelog
+
+### v1.3.7 (2025-01-17)
+- 📊 **Account Available Models**: Added available models list in account detail page
+- ⚡ **Model Rate Multiplier**: Model list now displays rate multiplier (e.g., 1.3x credit)
+- 🚫 **Ban Details Dialog**: Click "Banned" label to view detailed ban info and support link
+- ✅ **Button Click Feedback**: Added success feedback for API Key copy and generate buttons
+- 🎨 **Models List UI**: Improved dual-column grid layout for proxy models dialog
+- 🎯 **Subscription Flow Refactor**: Clicking subscription label now fetches available subscriptions first, then displays plan selection page
+- 👤 **First-time User Support**: Properly handle first-time user subscription flow using `qSubscriptionType` parameter
+- 💳 **Manage Billing Button**: All accounts now show "Manage Billing" button regardless of subscription status
+- 📋 **Auto Copy Link**: Payment link is automatically copied to clipboard when selecting a subscription plan
+- ✅ **Copy Success Toast**: Shows green "Link copied to clipboard!" message, auto-closes dialog after 800ms
+- ❌ **Error Messages**: Shows red error message in dialog when subscription operations fail
+- 🔧 **API Fix**: Fixed to use correct `x-amzn-codewhisperer-optout-preference` request header
+- 🌐 **API Proxy Claude Code Support**: Added `/anthropic/v1/messages`, `/v1/messages/count_tokens`, `/api/event_logging/batch` endpoints
+- 💾 **Proxy Config Persistence**: Port and host changes are now automatically saved
+- 🔒 **Enhanced CORS Headers**: Added more request headers support for Claude Code compatibility
+- 📏 **Tool Description Length Limit**: Auto-truncate tool descriptions exceeding 10240 bytes
+- 📝 **Content Non-empty Check**: Ensure message content sent to Kiro API is non-empty
+
 ### v1.3.6 (2025-01-17)
 - 🔑 **API Key Persistence**: API Key is now persisted and preserved after app restart
 - 👁️ **API Key Show/Hide**: Added toggle to show/hide API Key in input field

@@ -80,7 +80,11 @@ export function openaiToKiro(
         })
       }
     } else if (msg.role === 'assistant') {
-      const assistantContent = typeof msg.content === 'string' ? msg.content : ''
+      // Kiro API 要求 content 非空
+      let assistantContent = typeof msg.content === 'string' ? msg.content : ''
+      if (!assistantContent.trim() && msg.tool_calls && msg.tool_calls.length > 0) {
+        assistantContent = 'Using tools.'
+      }
       const toolUses: KiroToolUse[] = []
 
       if (msg.tool_calls) {
@@ -204,16 +208,26 @@ function normalizeImageFormat(format: string): string {
   return formatMap[lower] || 'png'
 }
 
+// Kiro API 工具描述最大长度
+const KIRO_MAX_TOOL_DESC_LEN = 10237 // 留出 "..." 的空间
+
 function convertOpenAITools(tools?: OpenAITool[]): KiroToolWrapper[] {
   if (!tools) return []
 
-  return tools.map(tool => ({
-    toolSpecification: {
-      name: shortenToolName(tool.function.name),
-      description: tool.function.description || `Tool: ${tool.function.name}`,
-      inputSchema: { json: tool.function.parameters }
+  return tools.map(tool => {
+    let description = tool.function.description || `Tool: ${tool.function.name}`
+    // 截断过长的描述
+    if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
+      description = description.substring(0, KIRO_MAX_TOOL_DESC_LEN) + '...'
     }
-  }))
+    return {
+      toolSpecification: {
+        name: shortenToolName(tool.function.name),
+        description,
+        inputSchema: { json: tool.function.parameters }
+      }
+    }
+  })
 }
 
 function shortenToolName(name: string): string {

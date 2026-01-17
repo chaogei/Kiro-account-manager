@@ -7,6 +7,7 @@ import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
 import icon from '../../resources/icon.png?asset'
 import { ProxyServer, type ProxyAccount, type ProxyConfig } from './proxy'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions } from './proxy/kiroApi'
 
 // ============ 自动更新配置 ============
 autoUpdater.autoDownload = false
@@ -3321,6 +3322,92 @@ app.whenReady().then(() => {
     }
     proxyServer.clearModelCache()
     return { success: true }
+  })
+
+  // IPC: 获取可用模型列表
+  ipcMain.handle('proxy-get-models', async () => {
+    if (!proxyServer) {
+      return { success: false, error: 'Proxy server not initialized', models: [] }
+    }
+    try {
+      const result = await proxyServer.getAvailableModels()
+      return { success: true, ...result }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get models', models: [] }
+    }
+  })
+
+  // IPC: 获取账户可用模型列表
+  ipcMain.handle('account-get-models', async (_event, accessToken: string) => {
+    try {
+      const models = await fetchKiroModels({ accessToken } as ProxyAccount)
+      return {
+        success: true,
+        models: models.map(m => ({
+          id: m.modelId,
+          name: m.modelName,
+          description: m.description,
+          inputTypes: m.supportedInputTypes,
+          maxInputTokens: m.tokenLimits?.maxInputTokens,
+          maxOutputTokens: m.tokenLimits?.maxOutputTokens,
+          rateMultiplier: m.rateMultiplier,
+          rateUnit: m.rateUnit
+        }))
+      }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get models', models: [] }
+    }
+  })
+
+  // IPC: 获取可用订阅列表
+  ipcMain.handle('account-get-subscriptions', async (_event, accessToken: string) => {
+    try {
+      const result = await fetchAvailableSubscriptions({ accessToken } as ProxyAccount)
+      if (result.subscriptionPlans) {
+        return { 
+          success: true, 
+          plans: result.subscriptionPlans,
+          disclaimer: result.disclaimer 
+        }
+      }
+      return { success: false, error: 'No subscription plans returned', plans: [] }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get subscriptions', plans: [] }
+    }
+  })
+
+  // IPC: 获取订阅管理/支付链接
+  ipcMain.handle('account-get-subscription-url', async (_event, accessToken: string, subscriptionType?: string) => {
+    try {
+      const result = await fetchSubscriptionToken({ accessToken } as ProxyAccount, subscriptionType)
+      if (result.encodedVerificationUrl) {
+        return { success: true, url: result.encodedVerificationUrl, status: result.status }
+      }
+      return { success: false, error: result.message || 'No subscription URL returned' }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get subscription URL' }
+    }
+  })
+
+  // IPC: 在新窗口打开订阅链接
+  ipcMain.handle('open-subscription-window', async (_event, url: string) => {
+    try {
+      const subscriptionWindow = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        title: 'Kiro Subscription',
+        icon: icon,
+        autoHideMenuBar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true
+        }
+      })
+      subscriptionWindow.loadURL(url)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to open window' }
+    }
   })
 
   // 代理日志持久化
