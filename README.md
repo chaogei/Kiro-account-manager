@@ -31,7 +31,7 @@
 ### 🔐 Multi-Account Management
 - Add, edit, and delete multiple Kiro accounts
 - One-click quick account switching
-- Support Builder ID and Social (Google/GitHub) login methods
+- Support Builder ID, IAM Identity Center (SSO) and Social (Google/GitHub) login methods
 - Batch import/export account data
 
 ### 🔄 Auto Refresh
@@ -270,6 +270,18 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ---
 
 ## 📋 Changelog
+
+### v1.3.8 (2025-01-18)
+- 🏢 **IAM Identity Center SSO Login**: Added organization identity login support via IAM Identity Center SSO
+- 🔗 **SSO Start URL Input**: Users can input their organization's SSO Start URL for authentication
+- 🌍 **AWS Region Selection**: Support 20+ AWS regions for SSO login (US, Europe, Asia Pacific, etc.)
+- 🏷️ **Enterprise Provider Support**: OIDC credential import now supports `Enterprise` provider type
+- 📦 **Batch Import Enhancement**: Batch import JSON example now includes Enterprise provider
+- 🔄 **One-Click Switch Compatibility**: Account switching fully supports Enterprise/IAM_SSO provider types
+- 📊 **Statistics Enhancement**: Account statistics now track Enterprise and IAM_SSO identity types
+- 📌 **Tray Icon Enhancement**: Tray menu icons now use external PNG files, support custom replacement
+- 🔄 **Tray Status Sync**: Tray status updates in real-time when starting/stopping proxy from UI
+- 📝 **Close Confirm Dialog**: Custom close confirmation dialog with "Remember my choice" option
 
 ### v1.3.7 (2025-01-17)
 - 📊 **Account Available Models**: Added available models list in account detail page

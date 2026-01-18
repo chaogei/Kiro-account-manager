@@ -168,7 +168,7 @@ interface KiroApi {
     clientSecret: string
     region?: string
     authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Github' | 'Google'
+    provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'
   }) => Promise<{ success: boolean; error?: string }>
 
   // 文件操作
@@ -328,6 +328,33 @@ interface KiroApi {
 
   // 取消 Builder ID 登录
   cancelBuilderIdLogin: () => Promise<{ success: boolean }>
+
+  // 启动 IAM Identity Center SSO 登录
+  startIamSsoLogin: (startUrl: string, region?: string) => Promise<{
+    success: boolean
+    userCode?: string
+    verificationUri?: string
+    expiresIn?: number
+    interval?: number
+    error?: string
+  }>
+
+  // 轮询 IAM SSO 授权状态
+  pollIamSsoAuth: (region?: string) => Promise<{
+    success: boolean
+    completed?: boolean
+    status?: string
+    accessToken?: string
+    refreshToken?: string
+    clientId?: string
+    clientSecret?: string
+    region?: string
+    expiresIn?: number
+    error?: string
+  }>
+
+  // 取消 IAM SSO 登录
+  cancelIamSsoLogin: () => Promise<{ success: boolean }>
 
   // 启动 Social Auth 登录 (Google/GitHub)
   startSocialLogin: (provider: 'Google' | 'Github', usePrivateMode?: boolean) => Promise<{
@@ -549,6 +576,60 @@ interface KiroApi {
 
   // 监听反代状态变化事件
   onProxyStatusChange: (callback: (status: { running: boolean; port: number }) => void) => () => void
+
+  // ============ 托盘相关 API ============
+
+  // 获取托盘设置
+  getTraySettings: () => Promise<{
+    enabled: boolean
+    closeAction: 'ask' | 'minimize' | 'quit'
+    showNotifications: boolean
+    minimizeOnStart: boolean
+  }>
+
+  // 保存托盘设置
+  saveTraySettings: (settings: {
+    enabled?: boolean
+    closeAction?: 'ask' | 'minimize' | 'quit'
+    showNotifications?: boolean
+    minimizeOnStart?: boolean
+  }) => Promise<{ success: boolean; error?: string }>
+
+  // 更新托盘当前账户信息
+  updateTrayAccount: (account: {
+    id: string
+    email: string
+    idp: string
+    status: string
+    usage?: {
+      inputTokens: number
+      outputTokens: number
+      totalRequests: number
+    }
+  } | null) => void
+
+  // 更新托盘账户列表
+  updateTrayAccountList: (accounts: {
+    id: string
+    email: string
+    idp: string
+    status: string
+  }[]) => void
+
+  // 刷新托盘菜单
+  refreshTrayMenu: () => void
+
+  // 监听托盘刷新账户事件
+  onTrayRefreshAccount: (callback: () => void) => () => void
+
+  // 监听托盘切换账户事件
+  onTraySwitchAccount: (callback: () => void) => () => void
+
+  // 监听显示关闭确认对话框事件
+  onShowCloseConfirmDialog: (callback: () => void) => () => void
+
+  // 发送关闭确认对话框响应
+  sendCloseConfirmResponse: (action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean) => void
 }
 
 declare global {

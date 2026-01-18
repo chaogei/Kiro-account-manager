@@ -325,11 +325,15 @@ export function claudeToKiro(
   const timestamp = new Date().toISOString()
   systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
-  // 构建历史消息
+  // 构建历史消息 - Kiro API 要求严格的 user -> assistant 交替
   const history: KiroHistoryMessage[] = []
   const toolResults: KiroToolResult[] = []
   let currentContent = ''
   const images: KiroImage[] = []
+
+  // 临时存储，用于合并连续的同类型消息
+  let pendingUserContent = ''
+  let pendingUserImages: KiroImage[] = []
 
   for (let i = 0; i < request.messages.length; i++) {
     const msg = request.messages[i]
@@ -337,23 +341,58 @@ export function claudeToKiro(
 
     if (msg.role === 'user') {
       const { content: userContent, images: userImages, toolResults: userToolResults } = extractClaudeContent(msg)
+      
+      // toolResults 总是收集到最终请求中
       toolResults.push(...userToolResults)
 
       if (isLast) {
-        currentContent = userContent
-        images.push(...userImages)
+        // 最后一条消息：合并之前的 pending 内容
+        currentContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
+        images.push(...pendingUserImages, ...userImages)
+        pendingUserContent = ''
+        pendingUserImages = []
       } else {
-        history.push({
-          userInputMessage: {
-            content: userContent || 'Continue',
-            modelId,
-            origin,
-            images: userImages.length > 0 ? userImages : undefined
+        // 非最后一条：检查下一条是否是 assistant
+        const nextMsg = request.messages[i + 1]
+        if (nextMsg && nextMsg.role === 'assistant') {
+          // 下一条是 assistant，可以安全添加到 history
+          const finalUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
+          const finalUserImages = [...pendingUserImages, ...userImages]
+          
+          if (finalUserContent.trim() || finalUserImages.length > 0) {
+            history.push({
+              userInputMessage: {
+                content: finalUserContent || 'Continue',
+                modelId,
+                origin,
+                images: finalUserImages.length > 0 ? finalUserImages : undefined
+              }
+            })
           }
-        })
+          pendingUserContent = ''
+          pendingUserImages = []
+        } else {
+          // 下一条不是 assistant（可能是连续 user 或结束），累积内容
+          pendingUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
+          pendingUserImages.push(...userImages)
+        }
       }
     } else if (msg.role === 'assistant') {
       const { content: assistantContent, toolUses } = extractClaudeAssistantContent(msg)
+
+      // 如果有 pending 的 user 内容但还没添加到 history，先添加
+      if (pendingUserContent.trim() || pendingUserImages.length > 0) {
+        history.push({
+          userInputMessage: {
+            content: pendingUserContent || 'Continue',
+            modelId,
+            origin,
+            images: pendingUserImages.length > 0 ? pendingUserImages : undefined
+          }
+        })
+        pendingUserContent = ''
+        pendingUserImages = []
+      }
 
       history.push({
         assistantResponseMessage: {
@@ -364,12 +403,30 @@ export function claudeToKiro(
     }
   }
 
+  // 处理剩余的 pending 内容（如果最后几条都是 user 且不是 isLast）
+  if (pendingUserContent.trim() || pendingUserImages.length > 0) {
+    currentContent = pendingUserContent + (currentContent ? '\n' + currentContent : '')
+    images.unshift(...pendingUserImages)
+  }
+
+  // 确保 history 以 user 开始（Kiro API 要求）
+  // 如果 history 以 assistant 开始，在前面插入一个空的 user 消息
+  if (history.length > 0 && history[0].assistantResponseMessage) {
+    history.unshift({
+      userInputMessage: {
+        content: 'Begin conversation',
+        modelId,
+        origin
+      }
+    })
+  }
+
   // 构建最终内容
   let finalContent = ''
   if (systemPrompt) {
     finalContent = `--- SYSTEM PROMPT ---\n${systemPrompt}\n--- END SYSTEM PROMPT ---\n\n`
   }
-  finalContent += currentContent || 'Continue'
+  finalContent += currentContent || (toolResults.length > 0 ? 'Tool results provided.' : 'Continue')
 
   // 转换工具定义
   const kiroTools = convertClaudeTools(request.tools)
@@ -446,19 +503,31 @@ function extractClaudeAssistantContent(msg: ClaudeMessage): { content: string; t
     }
   }
 
+  // Kiro API 要求 content 非空
+  if (!content.trim() && toolUses.length > 0) {
+    content = 'Using tools.'
+  }
+
   return { content, toolUses }
 }
 
 function convertClaudeTools(tools?: { name: string; description: string; input_schema: unknown }[]): KiroToolWrapper[] {
   if (!tools) return []
 
-  return tools.map(tool => ({
-    toolSpecification: {
-      name: shortenToolName(tool.name),
-      description: tool.description || `Tool: ${tool.name}`,
-      inputSchema: { json: tool.input_schema }
+  return tools.map(tool => {
+    let description = tool.description || `Tool: ${tool.name}`
+    // 截断过长的描述
+    if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
+      description = description.substring(0, KIRO_MAX_TOOL_DESC_LEN) + '...'
     }
-  }))
+    return {
+      toolSpecification: {
+        name: shortenToolName(tool.name),
+        description,
+        inputSchema: { json: tool.input_schema }
+      }
+    }
+  })
 }
 
 // ============ Kiro -> Claude 转换 ============

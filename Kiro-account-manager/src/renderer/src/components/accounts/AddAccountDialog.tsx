@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
+import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import type { SubscriptionType } from '@/types/account'
@@ -57,7 +57,7 @@ interface VerifiedData {
 }
 
 type ImportMode = 'oidc' | 'sso' | 'login'
-type LoginType = 'builderid' | 'google' | 'github'
+type LoginType = 'builderid' | 'google' | 'github' | 'iamsso'
 
 export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): React.ReactNode {
   const { addAccount, accounts, batchImportConcurrency, loginPrivateMode } = useAccountsStore()
@@ -82,7 +82,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   const [clientSecret, setClientSecret] = useState('')
   const [region, setRegion] = useState('us-east-1')
   const [authMethod, setAuthMethod] = useState<'IdC' | 'social'>('IdC')
-  const [provider, setProvider] = useState('BuilderId')  // 'BuilderId', 'Github', 'Google'
+  const [provider, setProvider] = useState('BuilderId')  // 'BuilderId', 'Enterprise', 'Github', 'Google'
 
   // SSO Token 导入
   const [ssoToken, setSsoToken] = useState('')
@@ -115,6 +115,15 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   } | null>(null)
   const [copied, setCopied] = useState(false)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  
+  // IAM SSO 登录相关状态
+  const [ssoStartUrl, setSsoStartUrl] = useState('')
+  const [iamSsoLoginData, setIamSsoLoginData] = useState<{
+    userCode: string
+    verificationUri: string
+    expiresIn: number
+    interval: number
+  } | null>(null)
 
   // 清理轮询
   useEffect(() => {
@@ -287,6 +296,90 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     }
   }
 
+  // 启动 IAM SSO 登录
+  const handleStartIamSsoLogin = async () => {
+    if (!ssoStartUrl.trim()) {
+      setError(isEn ? 'Please enter SSO Start URL' : '请输入 SSO Start URL')
+      return
+    }
+    
+    setIsLoggingIn(true)
+    setError(null)
+    setIamSsoLoginData(null)
+
+    try {
+      const result = await window.api.startIamSsoLogin(ssoStartUrl.trim(), region)
+      
+      if (result.success && result.userCode && result.verificationUri) {
+        setIamSsoLoginData({
+          userCode: result.userCode,
+          verificationUri: result.verificationUri,
+          expiresIn: result.expiresIn || 600,
+          interval: result.interval || 5
+        })
+
+        // 打开浏览器
+        window.api.openExternal(result.verificationUri)
+
+        // 开始轮询
+        startIamSsoPolling(result.interval || 5)
+      } else {
+        setError(result.error || (isEn ? 'Failed to start login' : '启动登录失败'))
+        setIsLoggingIn(false)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : (isEn ? 'Failed to start login' : '启动登录失败'))
+      setIsLoggingIn(false)
+    }
+  }
+
+  // 开始轮询 IAM SSO 授权
+  const startIamSsoPolling = (interval: number) => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+    }
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const result = await window.api.pollIamSsoAuth(region)
+        
+        if (!result.success) {
+          setError(result.error || (isEn ? 'Authorization failed' : '授权失败'))
+          setIsLoggingIn(false)
+          setIamSsoLoginData(null)
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          return
+        }
+
+        if (result.completed) {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          
+          await handleLoginSuccess({
+            accessToken: result.accessToken!,
+            refreshToken: result.refreshToken!,
+            clientId: result.clientId,
+            clientSecret: result.clientSecret,
+            region: result.region,
+            authMethod: 'IdC',
+            provider: 'IAM_SSO'
+          })
+          
+          setIsLoggingIn(false)
+          setIamSsoLoginData(null)
+        }
+        // 如果是 pending 或 slow_down，继续轮询
+      } catch (e) {
+        console.error('[AddAccountDialog] IAM SSO Poll error:', e)
+      }
+    }, interval * 1000)
+  }
+
   // 开始轮询 Builder ID 授权
   const startPolling = (interval: number) => {
     if (pollIntervalRef.current) {
@@ -343,12 +436,15 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
 
     if (loginType === 'builderid') {
       await window.api.cancelBuilderIdLogin()
+    } else if (loginType === 'iamsso') {
+      await window.api.cancelIamSsoLogin()
     } else {
       await window.api.cancelSocialLogin()
     }
 
     setIsLoggingIn(false)
     setBuilderIdLoginData(null)
+    setIamSsoLoginData(null)
     setError(null)
   }
 
@@ -584,7 +680,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
 
         // 根据 provider 自动确定 authMethod
         const credProvider = cred.provider || 'BuilderId'
-        const credAuthMethod = cred.authMethod || (credProvider === 'BuilderId' ? 'IdC' : 'social')
+        const credAuthMethod = cred.authMethod || ((credProvider === 'BuilderId' || credProvider === 'Enterprise') ? 'IdC' : 'social')
 
         const result = await window.api.verifyAccountCredentials({
           refreshToken: cred.refreshToken,
@@ -597,7 +693,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
 
         if (result.success && result.data) {
           const { email, userId } = result.data
-          const provider = (cred.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+          const provider = (cred.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'Github' | 'Google'
           
           if (isAccountExists(email, userId, provider)) {
             // 已存在的不记入失败，也从输入框中移除
@@ -606,14 +702,15 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           }
           
           // 根据 provider 确定 idp 和 authMethod
-          const idpMap: Record<string, 'BuilderId' | 'Github' | 'Google'> = {
+          const idpMap: Record<string, 'BuilderId' | 'Enterprise' | 'Github' | 'Google'> = {
             'BuilderId': 'BuilderId',
+            'Enterprise': 'Enterprise',
             'Github': 'Github',
             'Google': 'Google'
           }
           const idp = idpMap[provider] || 'BuilderId'
-          // GitHub 和 Google 使用 social 认证方式
-          const authMethod = cred.authMethod || (provider === 'BuilderId' ? 'IdC' : 'social')
+          // GitHub 和 Google 使用 social 认证方式，BuilderId 和 Enterprise 使用 IdC
+          const authMethod = cred.authMethod || ((provider === 'BuilderId' || provider === 'Enterprise') ? 'IdC' : 'social')
           
           const now = Date.now()
           addAccount({
@@ -1065,7 +1162,127 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                         <span className="text-xs text-muted-foreground">{isEn ? 'Login with AWS Builder ID' : '使用 AWS Builder ID 登录'}</span>
                       </div>
                     </button>
+
+                    {/* IAM Identity Center (Organization) */}
+                    <button 
+                      className="group w-full h-14 flex items-center px-4 gap-4 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl transition-all duration-200 hover:shadow-md hover:border-primary/30"
+                      onClick={() => {
+                        setLoginType('iamsso')
+                      }}
+                    >
+                      <div className="w-8 h-8 flex items-center justify-center bg-white rounded-full shadow-sm border p-1.5 group-hover:scale-110 transition-transform">
+                        <svg viewBox="0 0 24 24" fill="#232f3e" className="w-full h-full">
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+                        </svg>
+                      </div>
+                      <div className="flex flex-col items-start">
+                        <span className="text-sm font-semibold text-foreground">{isEn ? 'Organization Identity' : '组织身份'}</span>
+                        <span className="text-xs text-muted-foreground">{isEn ? 'IAM Identity Center SSO' : 'IAM Identity Center SSO'}</span>
+                      </div>
+                    </button>
                   </div>
+
+                  {/* IAM SSO 输入框 */}
+                  {loginType === 'iamsso' && !iamSsoLoginData && (
+                    <div className="space-y-4 p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
+                      <div className="space-y-2">
+                        <Label htmlFor="ssoStartUrl" className="text-sm font-medium">{isEn ? 'SSO Start URL' : 'SSO Start URL'}</Label>
+                        <Input
+                          id="ssoStartUrl"
+                          type="url"
+                          placeholder="https://your-org.awsapps.com/start"
+                          value={ssoStartUrl}
+                          onChange={(e) => setSsoStartUrl(e.target.value)}
+                          className="font-mono text-sm"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {isEn ? 'Get this from your organization admin' : '从您的组织管理员处获取'}
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="ssoRegion" className="text-sm font-medium">{isEn ? 'SSO Region' : 'SSO 区域'}</Label>
+                        <select
+                          id="ssoRegion"
+                          value={region}
+                          onChange={(e) => setRegion(e.target.value)}
+                          className="w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                        >
+                          <optgroup label="US">
+                            <option value="us-east-1">US East (N. Virginia)</option>
+                            <option value="us-east-2">US East (Ohio)</option>
+                            <option value="us-west-1">US West (N. California)</option>
+                            <option value="us-west-2">US West (Oregon)</option>
+                          </optgroup>
+                          <optgroup label="Europe">
+                            <option value="eu-west-1">Europe (Ireland)</option>
+                            <option value="eu-west-2">Europe (London)</option>
+                            <option value="eu-west-3">Europe (Paris)</option>
+                            <option value="eu-central-1">Europe (Frankfurt)</option>
+                            <option value="eu-north-1">Europe (Stockholm)</option>
+                            <option value="eu-south-1">Europe (Milan)</option>
+                          </optgroup>
+                          <optgroup label="Asia Pacific">
+                            <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
+                            <option value="ap-northeast-2">Asia Pacific (Seoul)</option>
+                            <option value="ap-northeast-3">Asia Pacific (Osaka)</option>
+                            <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                            <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
+                            <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+                            <option value="ap-east-1">Asia Pacific (Hong Kong)</option>
+                          </optgroup>
+                          <optgroup label="Other">
+                            <option value="ca-central-1">Canada (Central)</option>
+                            <option value="sa-east-1">South America (São Paulo)</option>
+                            <option value="me-south-1">Middle East (Bahrain)</option>
+                            <option value="af-south-1">Africa (Cape Town)</option>
+                          </optgroup>
+                        </select>
+                      </div>
+                      <Button 
+                        className="w-full"
+                        onClick={handleStartIamSsoLogin}
+                        disabled={!ssoStartUrl.trim() || isLoggingIn}
+                      >
+                        {isLoggingIn ? (isEn ? 'Starting...' : '启动中...') : (isEn ? 'Start Login' : '开始登录')}
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* IAM SSO 授权中 */}
+                  {loginType === 'iamsso' && iamSsoLoginData && (
+                    <div className="space-y-4 p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
+                      <div className="text-center space-y-2">
+                        <p className="text-sm font-medium">{isEn ? 'Enter this code in browser:' : '在浏览器中输入此代码:'}</p>
+                        <div className="flex items-center justify-center gap-2">
+                          <code className="px-4 py-2 bg-primary/10 text-primary font-mono text-2xl font-bold rounded-lg">
+                            {iamSsoLoginData.userCode}
+                          </code>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              navigator.clipboard.writeText(iamSsoLoginData.userCode)
+                              setCopied(true)
+                              setTimeout(() => setCopied(false), 2000)
+                            }}
+                          >
+                            {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>{isEn ? 'Waiting for authorization...' : '等待授权中...'}</span>
+                      </div>
+                      <Button 
+                        variant="destructive" 
+                        className="w-full"
+                        onClick={handleCancelLogin}
+                      >
+                        {isEn ? 'Cancel' : '取消登录'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1205,10 +1422,23 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                       <div className="flex gap-2">
                         <button
                           type="button"
-                          className={`flex-1 h-9 px-3 text-sm rounded-lg border transition-all ${authMethod === 'IdC' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input hover:bg-muted'}`}
-                          onClick={() => setAuthMethod('IdC')}
+                          className={`flex-1 h-9 px-3 text-sm rounded-lg border transition-all ${authMethod === 'IdC' && provider === 'BuilderId' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input hover:bg-muted'}`}
+                          onClick={() => {
+                            setAuthMethod('IdC')
+                            setProvider('BuilderId')
+                          }}
                         >
-                          Builder ID (IdC)
+                          Builder ID
+                        </button>
+                        <button
+                          type="button"
+                          className={`flex-1 h-9 px-3 text-sm rounded-lg border transition-all ${authMethod === 'IdC' && provider === 'Enterprise' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input hover:bg-muted'}`}
+                          onClick={() => {
+                            setAuthMethod('IdC')
+                            setProvider('Enterprise')
+                          }}
+                        >
+                          {isEn ? 'Organization' : '组织身份'}
                         </button>
                         <button
                           type="button"
@@ -1218,7 +1448,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                             setProvider('Google')
                           }}
                         >
-                          GitHub / Google
+                          Social
                         </button>
                       </div>
                       {authMethod === 'social' && (
@@ -1243,6 +1473,11 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                             {isEn ? 'Social login does not require Client ID and Secret' : '社交登录不需要 Client ID 和 Client Secret'}
                           </p>
                         </div>
+                      )}
+                      {authMethod === 'IdC' && provider === 'Enterprise' && (
+                        <p className="text-xs text-muted-foreground">
+                          {isEn ? 'Organization identity (IAM Identity Center SSO)' : '组织身份（IAM Identity Center SSO）'}
+                        </p>
                       )}
                     </div>
 
@@ -1313,7 +1548,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                   <div className="p-3 bg-blue-50/50 dark:bg-blue-900/10 rounded-xl border border-blue-100 dark:border-blue-900/20">
                     <p className="text-xs text-blue-600 dark:text-blue-400">
                       {isEn ? 'JSON array format. Required:' : '支持 JSON 数组格式。必填:'} <code className="px-1 bg-blue-100 dark:bg-blue-900/40 rounded">refreshToken</code>.
-                      {isEn ? 'Optional:' : '可选:'} <code className="px-1 bg-blue-100 dark:bg-blue-900/40 rounded">provider</code> (BuilderId/Github/Google),
+                      {isEn ? 'Optional:' : '可选:'} <code className="px-1 bg-blue-100 dark:bg-blue-900/40 rounded">provider</code> (BuilderId/Enterprise/Github/Google),
                       <code className="px-1 bg-blue-100 dark:bg-blue-900/40 rounded">clientId</code>,
                       <code className="px-1 bg-blue-100 dark:bg-blue-900/40 rounded">clientSecret</code>
                     </p>
@@ -1334,10 +1569,16 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   },
   {
     "refreshToken": "yyy",
-    "provider": "Github"
+    "clientId": "yyy",
+    "clientSecret": "yyy",
+    "provider": "Enterprise"
   },
   {
     "refreshToken": "zzz",
+    "provider": "Github"
+  },
+  {
+    "refreshToken": "aaa",
     "provider": "Google"
   }
 ]`}

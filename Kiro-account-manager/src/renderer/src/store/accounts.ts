@@ -1201,8 +1201,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         Google: 0,
         Github: 0,
         BuilderId: 0,
+        Enterprise: 0,
         AWSIdC: 0,
-        Internal: 0
+        Internal: 0,
+        IAM_SSO: 0
       },
       activeCount: 0,
       expiringSoonCount: 0

@@ -1,7 +1,7 @@
 import { useAccountsStore } from '@/store/accounts'
 import { Card, CardContent, CardHeader, CardTitle, Button } from '../ui'
-import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database, Layers, UserX } from 'lucide-react'
-import { useState } from 'react'
+import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database, Layers, UserX, Monitor } from 'lucide-react'
+import { useState, useEffect } from 'react'
 import { ExportDialog } from '../accounts/ExportDialog'
 import { useTranslation } from '@/hooks/useTranslation'
 
@@ -146,6 +146,41 @@ export function SettingsPage() {
   const [tempProxyUrl, setTempProxyUrl] = useState(proxyUrl)
   const [themeExpanded, setThemeExpanded] = useState(false)
   const [isManualRefreshing, setIsManualRefreshing] = useState(false)
+  
+  // 托盘设置状态
+  const [traySettings, setTraySettings] = useState({
+    enabled: true,
+    closeAction: 'ask' as 'ask' | 'minimize' | 'quit',
+    showNotifications: true,
+    minimizeOnStart: false
+  })
+  const [trayLoading, setTrayLoading] = useState(true)
+
+  // 加载托盘设置
+  useEffect(() => {
+    const loadTraySettings = async () => {
+      try {
+        const settings = await window.api.getTraySettings()
+        setTraySettings(settings)
+      } catch (error) {
+        console.error('Failed to load tray settings:', error)
+      } finally {
+        setTrayLoading(false)
+      }
+    }
+    loadTraySettings()
+  }, [])
+
+  // 保存托盘设置
+  const handleTraySettingChange = async (key: keyof typeof traySettings, value: boolean | string) => {
+    const newSettings = { ...traySettings, [key]: value }
+    setTraySettings(newSettings)
+    try {
+      await window.api.saveTraySettings({ [key]: value })
+    } catch (error) {
+      console.error('Failed to save tray settings:', error)
+    }
+  }
 
   const handleManualRefresh = async () => {
     setIsManualRefreshing(true)
@@ -622,6 +657,65 @@ export function SettingsPage() {
           <p className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-2">
             {isEn ? 'Recommended: 10-100. Too high may cause failures, too low is slow.' : '建议范围: 10-100。设置过大可能导致大量「验证失败」，设置过小则导入速度较慢。'}
           </p>
+        </CardContent>
+      </Card>
+
+      {/* 系统托盘设置 */}
+      <Card className="border-0 shadow-sm hover:shadow-md transition-shadow duration-200">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-primary/10">
+              <Monitor className="h-4 w-4 text-primary" />
+            </div>
+            {isEn ? 'System Tray' : '系统托盘'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {trayLoading ? (
+            <div className="text-sm text-muted-foreground">{isEn ? 'Loading...' : '加载中...'}</div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">{isEn ? 'Enable System Tray' : '启用系统托盘'}</p>
+                  <p className="text-sm text-muted-foreground">{isEn ? 'Show icon in system tray' : '在系统托盘显示图标'}</p>
+                </div>
+                <Button
+                  variant={traySettings.enabled ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => handleTraySettingChange('enabled', !traySettings.enabled)}
+                >
+                  {traySettings.enabled ? (isEn ? 'On' : '已开启') : (isEn ? 'Off' : '已关闭')}
+                </Button>
+              </div>
+
+              {traySettings.enabled && (
+                <>
+                  <div className="flex items-center justify-between pt-2 border-t">
+                    <div>
+                      <p className="font-medium">{isEn ? 'Close Button Action' : '关闭按钮行为'}</p>
+                      <p className="text-sm text-muted-foreground">{isEn ? 'What happens when you click X' : '点击关闭按钮时的行为'}</p>
+                    </div>
+                    <select
+                      className="w-[140px] h-9 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+                      value={traySettings.closeAction}
+                      onChange={(e) => handleTraySettingChange('closeAction', e.target.value)}
+                    >
+                      <option value="ask">{isEn ? 'Ask every time' : '每次询问'}</option>
+                      <option value="minimize">{isEn ? 'Minimize to tray' : '最小化到托盘'}</option>
+                      <option value="quit">{isEn ? 'Quit application' : '退出程序'}</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3 space-y-1">
+                <p>• {isEn ? 'Double-click tray icon to show window' : '双击托盘图标可以显示主窗口'}</p>
+                <p>• {isEn ? 'Right-click tray icon to show menu' : '右键托盘图标可以显示菜单'}</p>
+                <p>• {isEn ? 'Tray menu shows current account info and usage' : '托盘菜单可以查看当前账户信息和用量'}</p>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 

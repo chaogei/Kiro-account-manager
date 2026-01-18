@@ -8,6 +8,16 @@ import { encode, decode } from 'cbor-x'
 import icon from '../../resources/icon.png?asset'
 import { ProxyServer, type ProxyAccount, type ProxyConfig } from './proxy'
 import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions } from './proxy/kiroApi'
+import {
+  createTray,
+  destroyTray,
+  updateTrayMenu,
+  updateCurrentAccount,
+  updateAccountList,
+  setTrayTooltip,
+  type TraySettings,
+  defaultTraySettings
+} from './tray'
 
 // ============ 自动更新配置 ============
 autoUpdater.autoDownload = false
@@ -717,6 +727,83 @@ async function createBackup(data: unknown): Promise<void> {
 
 let mainWindow: BrowserWindow | null = null
 
+// ============ 托盘相关变量 ============
+let traySettings: TraySettings = { ...defaultTraySettings }
+let isQuitting = false // 标记是否真正退出应用
+let currentProxyAccount: { id: string; email: string; idp: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalRequests: number } } | null = null
+let allAccounts: { id: string; email: string; idp: string; status: string }[] = []
+
+// 加载托盘设置
+async function loadTraySettings(): Promise<void> {
+  try {
+    await initStore()
+    const saved = store?.get('traySettings') as TraySettings | undefined
+    if (saved) {
+      traySettings = { ...defaultTraySettings, ...saved }
+    }
+  } catch (error) {
+    console.error('[Tray] Failed to load tray settings:', error)
+  }
+}
+
+// 保存托盘设置
+async function saveTraySettings(): Promise<void> {
+  try {
+    await initStore()
+    store?.set('traySettings', traySettings)
+  } catch (error) {
+    console.error('[Tray] Failed to save tray settings:', error)
+  }
+}
+
+// 初始化托盘
+function initTray(): void {
+  if (!traySettings.enabled) return
+
+  createTray({
+    onShowWindow: () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) {
+          mainWindow.restore()
+        }
+        mainWindow.show()
+        mainWindow.focus()
+      }
+    },
+    onQuit: () => {
+      isQuitting = true
+      app.quit()
+    },
+    onRefreshAccount: async () => {
+      mainWindow?.webContents.send('tray-refresh-account')
+    },
+    onSwitchAccount: async () => {
+      mainWindow?.webContents.send('tray-switch-account')
+    },
+    onToggleProxy: async () => {
+      const server = initProxyServer()
+      if (server.isRunning()) {
+        server.stop()
+      } else {
+        await server.start()
+      }
+      updateTrayMenu()
+    },
+    getProxyStatus: () => {
+      const server = initProxyServer()
+      return {
+        running: server.isRunning(),
+        port: server.getConfig().port
+      }
+    },
+    getCurrentAccount: () => currentProxyAccount,
+    getAccountList: () => allAccounts
+  })
+
+  // 设置初始提示
+  setTrayTooltip(`Kiro 账号管理器 v${app.getVersion()}`)
+}
+
 function createWindow(): void {
   // Create the browser window.
   mainWindow = new BrowserWindow({
@@ -786,13 +873,35 @@ function createWindow(): void {
     }, 1000)
   })
 
-  mainWindow.on('close', async () => {
-    // 窗口关闭前保存数据
+  mainWindow.on('close', (event) => {
+    // 托盘最小化逻辑 - 必须同步检查并调用 preventDefault
+    if (traySettings.enabled && !isQuitting) {
+      if (traySettings.closeAction === 'minimize') {
+        // 直接最小化到托盘
+        event.preventDefault()
+        mainWindow?.hide()
+        return
+      } else if (traySettings.closeAction === 'ask' && mainWindow) {
+        // 询问用户 - 先阻止关闭，再异步处理
+        event.preventDefault()
+        // 通知渲染进程显示自定义对话框
+        mainWindow.webContents.send('show-close-confirm-dialog')
+        return
+      }
+      // closeAction === 'quit' 时继续关闭流程
+    }
+
+    // 窗口关闭前保存数据（同步保存，不等待备份）
     if (lastSavedData && store) {
       try {
         console.log('[Window] Saving data before close...')
         store.set('accountData', lastSavedData)
-        await createBackup(lastSavedData)
+        // 备份异步进行，不阻塞关闭
+        createBackup(lastSavedData).then(() => {
+          console.log('[Window] Backup created')
+        }).catch(err => {
+          console.error('[Window] Backup failed:', err)
+        })
         console.log('[Window] Data saved successfully')
       } catch (error) {
         console.error('[Window] Failed to save data:', error)
@@ -875,9 +984,13 @@ function handleProtocolUrl(url: string): void {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 注册自定义协议
   registerProtocol()
+
+  // 加载托盘设置并初始化托盘
+  await loadTraySettings()
+  initTray()
 
   // 初始化自动更新（仅生产环境）
   if (!is.dev) {
@@ -902,6 +1015,81 @@ app.whenReady().then(() => {
   ipcMain.on('open-external', (_event, url: string) => {
     if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
       shell.openExternal(url)
+    }
+  })
+
+  // ============ 托盘相关 IPC ============
+
+  // IPC: 获取托盘设置
+  ipcMain.handle('get-tray-settings', () => {
+    return traySettings
+  })
+
+  // IPC: 保存托盘设置
+  ipcMain.handle('save-tray-settings', async (_event, settings: Partial<TraySettings>) => {
+    try {
+      traySettings = { ...traySettings, ...settings }
+      await saveTraySettings()
+      
+      // 根据设置启用/禁用托盘
+      if (settings.enabled !== undefined) {
+        if (settings.enabled) {
+          initTray()
+        } else {
+          destroyTray()
+        }
+      }
+      
+      return { success: true }
+    } catch (error) {
+      console.error('[Tray] Failed to save settings:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+    }
+  })
+
+  // IPC: 更新托盘账户信息（从渲染进程调用）
+  ipcMain.on('update-tray-account', (_event, account: typeof currentProxyAccount) => {
+    currentProxyAccount = account
+    updateCurrentAccount(account)
+    
+    // 更新托盘提示
+    if (account) {
+      setTrayTooltip(`Kiro 账号管理器\n当前账户: ${account.email}`)
+    } else {
+      setTrayTooltip(`Kiro 账号管理器 v${app.getVersion()}`)
+    }
+  })
+
+  // IPC: 更新托盘账户列表（从渲染进程调用）
+  ipcMain.on('update-tray-account-list', (_event, accounts: typeof allAccounts) => {
+    allAccounts = accounts
+    updateAccountList(accounts)
+  })
+
+  // IPC: 刷新托盘菜单
+  ipcMain.on('refresh-tray-menu', () => {
+    updateTrayMenu()
+  })
+
+  // IPC: 关闭确认对话框响应
+  ipcMain.on('close-confirm-response', (_event, action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean) => {
+    if (action === 'minimize') {
+      mainWindow?.hide()
+    } else if (action === 'quit') {
+      // 如果用户选择记住选择
+      if (rememberChoice) {
+        traySettings.closeAction = 'quit'
+        saveTraySettings()
+      }
+      isQuitting = true
+      app.quit()
+    }
+    // cancel 时不做任何操作
+    
+    // 如果用户选择记住"最小化"选择
+    if (action === 'minimize' && rememberChoice) {
+      traySettings.closeAction = 'minimize'
+      saveTraySettings()
     }
   })
 
@@ -2536,8 +2724,8 @@ app.whenReady().then(() => {
 
   // 存储当前登录状态
   let currentLoginState: {
-    type: 'builderid' | 'social'
-    // BuilderId 相关
+    type: 'builderid' | 'social' | 'iamsso'
+    // BuilderId / IAM SSO 相关
     clientId?: string
     clientSecret?: string
     deviceCode?: string
@@ -2545,6 +2733,7 @@ app.whenReady().then(() => {
     verificationUri?: string
     interval?: number
     expiresAt?: number
+    startUrl?: string // IAM SSO 专用
     // Social Auth 相关
     codeVerifier?: string
     codeChallenge?: string
@@ -2711,6 +2900,175 @@ app.whenReady().then(() => {
   // IPC: 取消 Builder ID 登录
   ipcMain.handle('cancel-builder-id-login', async () => {
     console.log('[Login] Cancelling Builder ID login...')
+    currentLoginState = null
+    return { success: true }
+  })
+
+  // IPC: 启动 IAM Identity Center SSO 登录
+  ipcMain.handle('start-iam-sso-login', async (_event, startUrl: string, region: string = 'us-east-1') => {
+    console.log('[Login] Starting IAM Identity Center SSO login...')
+    console.log('[Login] Start URL:', startUrl)
+    
+    // 验证 startUrl 格式
+    if (!startUrl || !startUrl.startsWith('https://')) {
+      return { success: false, error: 'SSO Start URL 必须以 https:// 开头' }
+    }
+    
+    const oidcBase = `https://oidc.${region}.amazonaws.com`
+    const scopes = [
+      'codewhisperer:completions',
+      'codewhisperer:analysis',
+      'codewhisperer:conversations',
+      'codewhisperer:transformations',
+      'codewhisperer:taskassist'
+    ]
+
+    try {
+      // Step 1: 注册 OIDC 客户端
+      console.log('[Login] Step 1: Registering OIDC client...')
+      const regRes = await fetch(`${oidcBase}/client/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientName: 'Kiro Account Manager',
+          clientType: 'public',
+          scopes,
+          grantTypes: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+          issuerUrl: startUrl
+        })
+      })
+
+      if (!regRes.ok) {
+        const errText = await regRes.text()
+        return { success: false, error: `注册客户端失败: ${errText}` }
+      }
+
+      const regData = await regRes.json()
+      const clientId = regData.clientId
+      const clientSecret = regData.clientSecret
+      console.log('[Login] Client registered:', clientId.substring(0, 30) + '...')
+
+      // Step 2: 发起设备授权
+      console.log('[Login] Step 2: Starting device authorization...')
+      const authRes = await fetch(`${oidcBase}/device_authorization`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, clientSecret, startUrl })
+      })
+
+      if (!authRes.ok) {
+        const errText = await authRes.text()
+        return { success: false, error: `设备授权失败: ${errText}` }
+      }
+
+      const authData = await authRes.json()
+      const { deviceCode, userCode, verificationUri, verificationUriComplete, interval = 5, expiresIn = 600 } = authData
+      console.log('[Login] Device code obtained, user_code:', userCode)
+
+      // 保存登录状态
+      currentLoginState = {
+        type: 'iamsso',
+        clientId,
+        clientSecret,
+        deviceCode,
+        userCode,
+        verificationUri,
+        interval,
+        expiresAt: Date.now() + expiresIn * 1000,
+        startUrl // 保存 startUrl 用于后续使用
+      }
+
+      return {
+        success: true,
+        userCode,
+        verificationUri: verificationUriComplete || verificationUri,
+        expiresIn,
+        interval
+      }
+    } catch (error) {
+      console.error('[Login] Error:', error)
+      return { success: false, error: error instanceof Error ? error.message : '登录失败' }
+    }
+  })
+
+  // IPC: 轮询 IAM SSO 授权状态
+  ipcMain.handle('poll-iam-sso-auth', async (_event, region: string = 'us-east-1') => {
+    console.log('[Login] Polling for IAM SSO authorization...')
+
+    if (!currentLoginState || currentLoginState.type !== 'iamsso') {
+      return { success: false, error: '没有进行中的 IAM SSO 登录' }
+    }
+
+    if (Date.now() > (currentLoginState.expiresAt || 0)) {
+      currentLoginState = null
+      return { success: false, error: '授权已过期，请重新开始' }
+    }
+
+    const oidcBase = `https://oidc.${region}.amazonaws.com`
+    const { clientId, clientSecret, deviceCode } = currentLoginState
+
+    try {
+      const tokenRes = await fetch(`${oidcBase}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId,
+          clientSecret,
+          grantType: 'urn:ietf:params:oauth:grant-type:device_code',
+          deviceCode
+        })
+      })
+
+      if (tokenRes.status === 200) {
+        const tokenData = await tokenRes.json()
+        console.log('[Login] IAM SSO Authorization successful!')
+        
+        const result = {
+          success: true,
+          completed: true,
+          accessToken: tokenData.accessToken,
+          refreshToken: tokenData.refreshToken,
+          clientId,
+          clientSecret,
+          region,
+          expiresIn: tokenData.expiresIn
+        }
+        
+        currentLoginState = null
+        return result
+      } else if (tokenRes.status === 400) {
+        const errData = await tokenRes.json()
+        const error = errData.error
+
+        if (error === 'authorization_pending') {
+          return { success: true, completed: false, status: 'pending' }
+        } else if (error === 'slow_down') {
+          if (currentLoginState) {
+            currentLoginState.interval = (currentLoginState.interval || 5) + 5
+          }
+          return { success: true, completed: false, status: 'slow_down' }
+        } else if (error === 'expired_token') {
+          currentLoginState = null
+          return { success: false, error: '设备码已过期' }
+        } else if (error === 'access_denied') {
+          currentLoginState = null
+          return { success: false, error: '用户拒绝授权' }
+        } else {
+          currentLoginState = null
+          return { success: false, error: `授权错误: ${error}` }
+        }
+      } else {
+        return { success: false, error: `未知响应: ${tokenRes.status}` }
+      }
+    } catch (error) {
+      console.error('[Login] Poll error:', error)
+      return { success: false, error: error instanceof Error ? error.message : '轮询失败' }
+    }
+  })
+
+  // IPC: 取消 IAM SSO 登录
+  ipcMain.handle('cancel-iam-sso-login', async () => {
+    console.log('[Login] Cancelling IAM SSO login...')
     currentLoginState = null
     return { success: true }
   })
@@ -3212,6 +3570,8 @@ app.whenReady().then(() => {
         server.updateConfig(config)
       }
       await server.start()
+      // 更新托盘菜单状态
+      updateTrayMenu()
       return { success: true, port: server.getConfig().port }
     } catch (error) {
       console.error('[ProxyServer] Start failed:', error)
@@ -3225,6 +3585,8 @@ app.whenReady().then(() => {
       if (proxyServer) {
         await proxyServer.stop()
       }
+      // 更新托盘菜单状态
+      updateTrayMenu()
       return { success: true }
     } catch (error) {
       console.error('[ProxyServer] Stop failed:', error)

@@ -271,6 +271,17 @@ npx electron-builder --linux --arm64
 
 ## 📋 更新日志
 
+### v1.3.8 (2025-01-18)
+- 🏢 **IAM Identity Center SSO 登录**: 新增组织身份登录支持，通过 IAM Identity Center SSO 认证
+- 🔗 **SSO Start URL 输入**: 用户可输入组织的 SSO Start URL 进行认证
+- 🌍 **AWS Region 选择**: 支持 20+ 个 AWS 区域选择（美国、欧洲、亚太等）
+- 🏷️ **Enterprise Provider 支持**: OIDC 凭证导入支持 `Enterprise` 身份提供商类型
+- 📦 **批量导入增强**: 批量导入 JSON 示例包含 Enterprise provider 示例
+- 🔄 **一键切号兼容**: 账户切换完全支持 Enterprise/IAM_SSO 身份类型
+- 📊 **统计功能增强**: 账户统计支持 Enterprise 和 IAM_SSO 身份类型
+- 📌 **托盘图标优化**: 托盘菜单图标改用外部 PNG 文件，支持自定义替换
+- 🔄 **托盘状态同步**: 在软件界面启动/停止代理服务时，托盘状态实时同步更新
+- 📝 **关闭确认对话框**: 自定义关闭确认对话框，支持记住用户选择
 
 ### v1.3.7 (2025-01-17)
 - 📊 **账户可用模型**: 账户详情页新增可用模型列表，显示该账户支持的模型

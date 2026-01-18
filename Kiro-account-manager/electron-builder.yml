@@ -18,9 +18,9 @@ protocols:
 copyright: Copyright 2025 Kiro
 win:
   executableName: kiro-account-manager
-  icon: resources/kiro-high-resolution-logo-transparent.ico
+  icon: resources/icon.ico
   legalTrademarks: Copyright 2025 Kiro
-  signAndEditExecutable: false
+  requestedExecutionLevel: asInvoker
 nsis:
   artifactName: ${name}-${version}-${arch}-setup.${ext}
   shortcutName: Kiro 账号管理器

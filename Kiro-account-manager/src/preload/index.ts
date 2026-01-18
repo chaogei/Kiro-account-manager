@@ -260,6 +260,39 @@ const api = {
     return ipcRenderer.invoke('cancel-builder-id-login')
   },
 
+  // 启动 IAM Identity Center SSO 登录
+  startIamSsoLogin: (startUrl: string, region?: string): Promise<{
+    success: boolean
+    userCode?: string
+    verificationUri?: string
+    expiresIn?: number
+    interval?: number
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('start-iam-sso-login', startUrl, region || 'us-east-1')
+  },
+
+  // 轮询 IAM SSO 授权状态
+  pollIamSsoAuth: (region?: string): Promise<{
+    success: boolean
+    completed?: boolean
+    status?: string
+    accessToken?: string
+    refreshToken?: string
+    clientId?: string
+    clientSecret?: string
+    region?: string
+    expiresIn?: number
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('poll-iam-sso-auth', region || 'us-east-1')
+  },
+
+  // 取消 IAM SSO 登录
+  cancelIamSsoLogin: (): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke('cancel-iam-sso-login')
+  },
+
   // 启动 Social Auth 登录 (Google/GitHub)
   startSocialLogin: (provider: 'Google' | 'Github', usePrivateMode?: boolean): Promise<{
     success: boolean
@@ -638,6 +671,96 @@ const api = {
     return () => {
       ipcRenderer.removeListener('proxy-status-change', handler)
     }
+  },
+
+  // ============ 托盘相关 API ============
+
+  // 获取托盘设置
+  getTraySettings: (): Promise<{
+    enabled: boolean
+    closeAction: 'ask' | 'minimize' | 'quit'
+    showNotifications: boolean
+    minimizeOnStart: boolean
+  }> => {
+    return ipcRenderer.invoke('get-tray-settings')
+  },
+
+  // 保存托盘设置
+  saveTraySettings: (settings: {
+    enabled?: boolean
+    closeAction?: 'ask' | 'minimize' | 'quit'
+    showNotifications?: boolean
+    minimizeOnStart?: boolean
+  }): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('save-tray-settings', settings)
+  },
+
+  // 更新托盘当前账户信息
+  updateTrayAccount: (account: {
+    id: string
+    email: string
+    idp: string
+    status: string
+    usage?: {
+      inputTokens: number
+      outputTokens: number
+      totalRequests: number
+    }
+  } | null): void => {
+    ipcRenderer.send('update-tray-account', account)
+  },
+
+  // 更新托盘账户列表
+  updateTrayAccountList: (accounts: {
+    id: string
+    email: string
+    idp: string
+    status: string
+  }[]): void => {
+    ipcRenderer.send('update-tray-account-list', accounts)
+  },
+
+  // 刷新托盘菜单
+  refreshTrayMenu: (): void => {
+    ipcRenderer.send('refresh-tray-menu')
+  },
+
+  // 监听托盘刷新账户事件
+  onTrayRefreshAccount: (callback: () => void): (() => void) => {
+    const handler = (): void => {
+      callback()
+    }
+    ipcRenderer.on('tray-refresh-account', handler)
+    return () => {
+      ipcRenderer.removeListener('tray-refresh-account', handler)
+    }
+  },
+
+  // 监听托盘切换账户事件
+  onTraySwitchAccount: (callback: () => void): (() => void) => {
+    const handler = (): void => {
+      callback()
+    }
+    ipcRenderer.on('tray-switch-account', handler)
+    return () => {
+      ipcRenderer.removeListener('tray-switch-account', handler)
+    }
+  },
+
+  // 监听显示关闭确认对话框事件
+  onShowCloseConfirmDialog: (callback: () => void): (() => void) => {
+    const handler = (): void => {
+      callback()
+    }
+    ipcRenderer.on('show-close-confirm-dialog', handler)
+    return () => {
+      ipcRenderer.removeListener('show-close-confirm-dialog', handler)
+    }
+  },
+
+  // 发送关闭确认对话框响应
+  sendCloseConfirmResponse: (action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean): void => {
+    ipcRenderer.send('close-confirm-response', action, rememberChoice)
   }
 }
 
