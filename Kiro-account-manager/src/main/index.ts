@@ -2733,7 +2733,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('logout-account', async () => {
     const os = await import('os')
     const path = await import('path')
-    const { readdir, unlink, rm } = await import('fs/promises')
+    const { readdir, unlink } = await import('fs/promises')
     
     try {
       const ssoCache = path.join(os.homedir(), '.aws', 'sso', 'cache')
