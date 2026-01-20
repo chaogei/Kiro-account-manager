@@ -271,6 +271,11 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
+### v1.4.2 (2025-01-20)
+- 🔄 **Native History Support**: Refactored based on Kiro official implementation, using native history field instead of text embedding
+- 🧹 **Message Sanitization**: Implemented sanitizeConversation to ensure message alternation, tool call matching, etc.
+- 🔧 **API Compatibility Fix**: Fixed 400 errors caused by incorrect message format
+
 ### v1.4.1 (2025-01-19)
 - 💰 **Credits Display**: Replaced Tokens with Credits usage display
 - 📊 **Total Credits Stats**: Added cumulative Credits statistics with persistence

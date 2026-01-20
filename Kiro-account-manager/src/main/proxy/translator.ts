@@ -16,7 +16,8 @@ import type {
   KiroToolWrapper,
   KiroToolResult,
   KiroImage,
-  KiroToolUse
+  KiroToolUse,
+  KiroUserInputMessage
 } from './types'
 import { buildKiroPayload, mapModelId } from './kiroApi'
 
@@ -53,11 +54,12 @@ export function openaiToKiro(
   const timestamp = new Date().toISOString()
   systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
-  // 构建历史消息
+  // 构建历史消息（参考 Proxycast 实现）
   const history: KiroHistoryMessage[] = []
   const toolResults: KiroToolResult[] = []
   let currentContent = ''
   const images: KiroImage[] = []
+  let systemPromptMerged = false // 标记 system prompt 是否已合并
 
   for (let i = 0; i < nonSystemMessages.length; i++) {
     const msg = nonSystemMessages[i]
@@ -66,13 +68,20 @@ export function openaiToKiro(
     if (msg.role === 'user') {
       const { content: userContent, images: userImages } = extractOpenAIContent(msg)
       
+      // 第一条 user 消息合并 system prompt（参考 Proxycast）
+      let mergedContent = userContent || 'Continue'
+      if (!systemPromptMerged && systemPrompt) {
+        mergedContent = `${systemPrompt}\n\n${mergedContent}`
+        systemPromptMerged = true
+      }
+      
       if (isLast) {
-        currentContent = userContent
+        currentContent = mergedContent
         images.push(...userImages)
       } else {
         history.push({
           userInputMessage: {
-            content: userContent || 'Continue',
+            content: mergedContent,
             modelId,
             origin,
             images: userImages.length > 0 ? userImages : undefined
@@ -84,6 +93,8 @@ export function openaiToKiro(
       let assistantContent = typeof msg.content === 'string' ? msg.content : ''
       if (!assistantContent.trim() && msg.tool_calls && msg.tool_calls.length > 0) {
         assistantContent = 'Using tools.'
+      } else if (!assistantContent.trim()) {
+        assistantContent = 'I understand.'
       }
       const toolUses: KiroToolUse[] = []
 
@@ -110,7 +121,7 @@ export function openaiToKiro(
         }
       })
     } else if (msg.role === 'tool') {
-      // Tool result
+      // Tool result - 收集到待处理列表
       if (msg.tool_call_id) {
         toolResults.push({
           toolUseId: msg.tool_call_id,
@@ -118,20 +129,44 @@ export function openaiToKiro(
           status: 'success'
         })
       }
+      
+      // 检查下一条消息：如果不是 tool 消息或已到末尾，将收集的 toolResults 添加为 user 消息
+      const nextMsg = nonSystemMessages[i + 1]
+      const shouldFlush = !nextMsg || nextMsg.role !== 'tool'
+      
+      if (shouldFlush && toolResults.length > 0 && !isLast) {
+        // 将 toolResults 作为 user 消息添加到 history
+        history.push({
+          userInputMessage: {
+            content: 'Tool results provided.',
+            modelId,
+            origin,
+            userInputMessageContext: {
+              toolResults: [...toolResults]
+            }
+          }
+        })
+        // 清空已处理的 toolResults
+        toolResults.length = 0
+      }
     }
   }
 
-  // 如果没有当前内容但有工具结果，创建一个占位内容
+  // 如果最后一条是 assistant 消息，自动发送 Continue（参考 Proxycast）
+  if (history.length > 0 && history[history.length - 1].assistantResponseMessage && !currentContent) {
+    currentContent = 'Continue.'
+  }
+
+  // 如果没有当前内容但有工具结果（最后一轮的），保留它们传给 currentMessage
   if (!currentContent && toolResults.length > 0) {
     currentContent = 'Tool results provided.'
   }
 
-  // 构建最终内容
-  let finalContent = ''
-  if (systemPrompt) {
-    finalContent = `--- SYSTEM PROMPT ---\n${systemPrompt}\n--- END SYSTEM PROMPT ---\n\n`
+  // 如果 system prompt 还未合并（没有 user 消息），直接作为 currentContent
+  let finalContent = currentContent || 'Continue.'
+  if (!systemPromptMerged && systemPrompt) {
+    finalContent = `${systemPrompt}\n\n${finalContent}`
   }
-  finalContent += currentContent || 'Continue'
 
   // 转换工具定义
   const kiroTools = convertOpenAITools(request.tools)
@@ -327,13 +362,14 @@ export function claudeToKiro(
 
   // 构建历史消息 - Kiro API 要求严格的 user -> assistant 交替
   const history: KiroHistoryMessage[] = []
-  const toolResults: KiroToolResult[] = []
+  let currentToolResults: KiroToolResult[] = []  // 只保存最后一条消息的 toolResults
   let currentContent = ''
   const images: KiroImage[] = []
 
   // 临时存储，用于合并连续的同类型消息
   let pendingUserContent = ''
   let pendingUserImages: KiroImage[] = []
+  let pendingToolResults: KiroToolResult[] = []
 
   for (let i = 0; i < request.messages.length; i++) {
     const msg = request.messages[i]
@@ -341,16 +377,15 @@ export function claudeToKiro(
 
     if (msg.role === 'user') {
       const { content: userContent, images: userImages, toolResults: userToolResults } = extractClaudeContent(msg)
-      
-      // toolResults 总是收集到最终请求中
-      toolResults.push(...userToolResults)
 
       if (isLast) {
-        // 最后一条消息：合并之前的 pending 内容
+        // 最后一条消息：合并之前的 pending 内容，toolResults 放入 currentMessage
         currentContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
         images.push(...pendingUserImages, ...userImages)
+        currentToolResults = [...pendingToolResults, ...userToolResults]
         pendingUserContent = ''
         pendingUserImages = []
+        pendingToolResults = []
       } else {
         // 非最后一条：检查下一条是否是 assistant
         const nextMsg = request.messages[i + 1]
@@ -358,40 +393,53 @@ export function claudeToKiro(
           // 下一条是 assistant，可以安全添加到 history
           const finalUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
           const finalUserImages = [...pendingUserImages, ...userImages]
+          const finalToolResults = [...pendingToolResults, ...userToolResults]
           
-          if (finalUserContent.trim() || finalUserImages.length > 0) {
-            history.push({
-              userInputMessage: {
-                content: finalUserContent || 'Continue',
-                modelId,
-                origin,
-                images: finalUserImages.length > 0 ? finalUserImages : undefined
+          if (finalUserContent.trim() || finalUserImages.length > 0 || finalToolResults.length > 0) {
+            const userInputMessage: KiroUserInputMessage = {
+              content: finalUserContent || (finalToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
+              modelId,
+              origin,
+              images: finalUserImages.length > 0 ? finalUserImages : undefined
+            }
+            // 如果有 toolResults，放入 userInputMessageContext
+            if (finalToolResults.length > 0) {
+              userInputMessage.userInputMessageContext = {
+                toolResults: finalToolResults
               }
-            })
+            }
+            history.push({ userInputMessage })
           }
           pendingUserContent = ''
           pendingUserImages = []
+          pendingToolResults = []
         } else {
           // 下一条不是 assistant（可能是连续 user 或结束），累积内容
           pendingUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
           pendingUserImages.push(...userImages)
+          pendingToolResults.push(...userToolResults)
         }
       }
     } else if (msg.role === 'assistant') {
       const { content: assistantContent, toolUses } = extractClaudeAssistantContent(msg)
 
       // 如果有 pending 的 user 内容但还没添加到 history，先添加
-      if (pendingUserContent.trim() || pendingUserImages.length > 0) {
-        history.push({
-          userInputMessage: {
-            content: pendingUserContent || 'Continue',
-            modelId,
-            origin,
-            images: pendingUserImages.length > 0 ? pendingUserImages : undefined
+      if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingToolResults.length > 0) {
+        const userInputMessage: KiroUserInputMessage = {
+          content: pendingUserContent || (pendingToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
+          modelId,
+          origin,
+          images: pendingUserImages.length > 0 ? pendingUserImages : undefined
+        }
+        if (pendingToolResults.length > 0) {
+          userInputMessage.userInputMessageContext = {
+            toolResults: pendingToolResults
           }
-        })
+        }
+        history.push({ userInputMessage })
         pendingUserContent = ''
         pendingUserImages = []
+        pendingToolResults = []
       }
 
       history.push({
@@ -404,9 +452,10 @@ export function claudeToKiro(
   }
 
   // 处理剩余的 pending 内容（如果最后几条都是 user 且不是 isLast）
-  if (pendingUserContent.trim() || pendingUserImages.length > 0) {
+  if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingToolResults.length > 0) {
     currentContent = pendingUserContent + (currentContent ? '\n' + currentContent : '')
     images.unshift(...pendingUserImages)
+    currentToolResults = [...pendingToolResults, ...currentToolResults]
   }
 
   // 确保 history 以 user 开始（Kiro API 要求）
@@ -426,7 +475,7 @@ export function claudeToKiro(
   if (systemPrompt) {
     finalContent = `--- SYSTEM PROMPT ---\n${systemPrompt}\n--- END SYSTEM PROMPT ---\n\n`
   }
-  finalContent += currentContent || (toolResults.length > 0 ? 'Tool results provided.' : 'Continue')
+  finalContent += currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue')
 
   // 转换工具定义
   const kiroTools = convertClaudeTools(request.tools)
@@ -437,7 +486,7 @@ export function claudeToKiro(
     origin,
     history,
     kiroTools,
-    toolResults,
+    currentToolResults,
     images,
     profileArn,
     {

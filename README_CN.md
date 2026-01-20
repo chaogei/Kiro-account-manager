@@ -271,6 +271,11 @@ npx electron-builder --linux --arm64
 
 ## 📋 更新日志
 
+### v1.4.2 (2025-01-20)
+- 🔄 **原生 History 支持**: 根据 Kiro 官方实现重构，使用原生 history 字段替代文本嵌入方式
+- 🧹 **消息清理逻辑**: 实现 sanitizeConversation 确保消息交替、工具调用匹配等
+- 🔧 **API 兼容性修复**: 修复之前因消息格式不正确导致的 400 错误
+
 ### v1.4.1 (2025-01-19)
 - 💰 **Credits 显示**: 使用 Credits 替代 Tokens 显示用量
 - 📊 **累计 Credits 统计**: 新增累计 Credits 统计并支持持久化

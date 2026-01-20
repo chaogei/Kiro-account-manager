@@ -145,43 +145,164 @@ export function injectSystemPrompts(
   return result
 }
 
-// 将工具结果转换为文本格式（因为 Kiro API 不支持 toolResults 字段）
-function formatToolResultsAsText(toolResults: KiroToolResult[]): string {
-  if (toolResults.length === 0) return ''
-  
-  let text = '\n\n--- TOOL RESULTS ---\n'
-  for (const tr of toolResults) {
-    const resultText = tr.content.map(c => c.text).join('\n')
-    text += `[Tool Result for ${tr.toolUseId}] (status: ${tr.status}):\n${resultText}\n\n`
-  }
-  text += '--- END TOOL RESULTS ---\n'
-  return text
+// ============= 消息清理逻辑（参考 Kiro 官方实现）=============
+
+// 占位消息
+const HELLO_MESSAGE: KiroHistoryMessage = {
+  userInputMessage: { content: 'Hello', origin: 'AI_EDITOR' }
 }
 
-// 将历史消息转换为文本格式（因为 Kiro API 不支持 history 字段）
-function formatHistoryAsText(history: KiroHistoryMessage[]): string {
-  if (history.length === 0) return ''
-  
-  let text = '\n\n--- CONVERSATION HISTORY ---\n'
-  for (const msg of history) {
-    if (msg.userInputMessage) {
-      text += `[User]: ${msg.userInputMessage.content}\n\n`
-    }
-    if (msg.assistantResponseMessage) {
-      text += `[Assistant]: ${msg.assistantResponseMessage.content}\n`
-      if (msg.assistantResponseMessage.toolUses && msg.assistantResponseMessage.toolUses.length > 0) {
-        for (const tu of msg.assistantResponseMessage.toolUses) {
-          text += `  [Tool Call: ${tu.name}] (id: ${tu.toolUseId})\n`
-        }
+const CONTINUE_MESSAGE: KiroHistoryMessage = {
+  userInputMessage: { content: 'Continue', origin: 'AI_EDITOR' }
+}
+
+const UNDERSTOOD_MESSAGE: KiroHistoryMessage = {
+  assistantResponseMessage: { content: 'understood' }
+}
+
+// 创建失败的工具结果消息
+function createFailedToolUseMessage(toolUseIds: string[]): KiroHistoryMessage {
+  return {
+    userInputMessage: {
+      content: '',
+      origin: 'AI_EDITOR',
+      userInputMessageContext: {
+        toolResults: toolUseIds.map(toolUseId => ({
+          toolUseId,
+          content: [{ text: 'Tool execution failed' }],
+          status: 'error' as const
+        }))
       }
-      text += '\n'
     }
   }
-  text += '--- END HISTORY ---\n'
-  return text
 }
 
-// 构建 Kiro API 请求负载
+// 类型检查函数
+function isUserInputMessage(message: KiroHistoryMessage): boolean {
+  return message != null && 'userInputMessage' in message && message.userInputMessage != null
+}
+
+function isAssistantResponseMessage(message: KiroHistoryMessage): boolean {
+  return message != null && 'assistantResponseMessage' in message && message.assistantResponseMessage != null
+}
+
+function hasToolResults(message: KiroHistoryMessage): boolean {
+  return !!(message.userInputMessage?.userInputMessageContext?.toolResults?.length)
+}
+
+function hasToolUses(message: KiroHistoryMessage): boolean {
+  return !!(message.assistantResponseMessage?.toolUses?.length)
+}
+
+function hasMatchingToolResults(
+  toolUses: KiroToolUse[] | undefined,
+  toolResults: KiroToolResult[] | undefined
+): boolean {
+  if (!toolUses || !toolUses.length) return true
+  if (!toolResults || !toolResults.length) return false
+  
+  const allToolUsesHaveResults = toolUses.every(
+    toolUse => toolResults.some(result => result.toolUseId === toolUse.toolUseId)
+  )
+  const allToolResultsHaveUses = toolResults.every(
+    result => toolUses.some(toolUse => result.toolUseId === toolUse.toolUseId)
+  )
+  return allToolUsesHaveResults && allToolResultsHaveUses
+}
+
+// 确保以 user 消息开始
+function ensureStartsWithUserMessage(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  if (messages.length === 0 || isUserInputMessage(messages[0])) {
+    return messages
+  }
+  return [HELLO_MESSAGE, ...messages]
+}
+
+// 确保以 user 消息结束
+function ensureEndsWithUserMessage(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  if (messages.length === 0) return [HELLO_MESSAGE]
+  if (isUserInputMessage(messages[messages.length - 1])) return messages
+  return [...messages, CONTINUE_MESSAGE]
+}
+
+// 确保消息交替
+function ensureAlternatingMessages(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  if (messages.length <= 1) return messages
+  
+  const result: KiroHistoryMessage[] = [messages[0]]
+  for (let i = 1; i < messages.length; i++) {
+    const prevMessage = result[result.length - 1]
+    const currentMessage = messages[i]
+    
+    if (isUserInputMessage(prevMessage) && isUserInputMessage(currentMessage)) {
+      result.push(UNDERSTOOD_MESSAGE)
+    } else if (isAssistantResponseMessage(prevMessage) && isAssistantResponseMessage(currentMessage)) {
+      result.push(CONTINUE_MESSAGE)
+    }
+    result.push(currentMessage)
+  }
+  return result
+}
+
+// 确保工具调用有对应结果
+function ensureValidToolUsesAndResults(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  const result: KiroHistoryMessage[] = []
+  
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]
+    result.push(message)
+    
+    if (isAssistantResponseMessage(message) && hasToolUses(message)) {
+      const nextMessage = i + 1 < messages.length ? messages[i + 1] : null
+      
+      if (!nextMessage || !isUserInputMessage(nextMessage) || !hasToolResults(nextMessage)) {
+        // 没有对应的工具结果，添加失败消息
+        const toolUses = message.assistantResponseMessage?.toolUses ?? []
+        const toolUseIds = toolUses.map((tu, idx) => tu.toolUseId ?? `toolUse_${idx + 1}`)
+        result.push(createFailedToolUseMessage(toolUseIds))
+      } else if (!hasMatchingToolResults(
+        message.assistantResponseMessage?.toolUses,
+        nextMessage.userInputMessage?.userInputMessageContext?.toolResults
+      )) {
+        // 工具结果不匹配，添加失败消息
+        const toolUses = message.assistantResponseMessage?.toolUses ?? []
+        const toolUseIds = toolUses.map((tu, idx) => tu.toolUseId ?? `toolUse_${idx + 1}`)
+        result.push(createFailedToolUseMessage(toolUseIds))
+      }
+    }
+  }
+  return result
+}
+
+// 移除空的 user 消息
+function removeEmptyUserMessages(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  if (messages.length <= 1) return messages
+  
+  const firstUserMessageIndex = messages.findIndex(isUserInputMessage)
+  return messages.filter((message, index) => {
+    if (isAssistantResponseMessage(message)) return true
+    if (isUserInputMessage(message) && index === firstUserMessageIndex) return true
+    if (isUserInputMessage(message)) {
+      const hasContent = message.userInputMessage?.content?.trim() !== ''
+      return hasContent || hasToolResults(message)
+    }
+    return true
+  })
+}
+
+// 清理会话消息（参考 Kiro 官方实现）
+function sanitizeConversation(messages: KiroHistoryMessage[]): KiroHistoryMessage[] {
+  let sanitized = [...messages]
+  sanitized = ensureStartsWithUserMessage(sanitized)
+  sanitized = removeEmptyUserMessages(sanitized)
+  sanitized = ensureValidToolUsesAndResults(sanitized)
+  sanitized = ensureAlternatingMessages(sanitized)
+  sanitized = ensureEndsWithUserMessage(sanitized)
+  return sanitized
+}
+
+// ============= 构建 Kiro API 请求负载（参考 Kiro 官方实现）=============
+
 export function buildKiroPayload(
   content: string,
   modelId: string,
@@ -193,33 +314,62 @@ export function buildKiroPayload(
   profileArn?: string,
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number }
 ): KiroPayload {
-  // Kiro API 不支持 history 和 toolResults 字段，需要将它们嵌入到 content 中
-  let finalContent = content
+  // 构建当前消息
+  const finalContent = content.trim() || (toolResults.length > 0 ? '' : 'Continue')
   
-  // 将历史消息转换为文本并添加到 content
-  if (history.length > 0) {
-    const historyText = formatHistoryAsText(history)
-    finalContent = historyText + finalContent
-  }
-  
-  // 将工具结果转换为文本并添加到 content
-  if (toolResults.length > 0) {
-    const toolResultsText = formatToolResultsAsText(toolResults)
-    finalContent = finalContent + toolResultsText
-  }
-
-  const userInputMessage: KiroUserInputMessage = {
+  const currentUserInputMessage: KiroUserInputMessage = {
     content: finalContent,
     modelId,
     origin
   }
 
   if (images.length > 0) {
-    userInputMessage.images = images
+    currentUserInputMessage.images = images
   }
 
+  // 构建 userInputMessageContext（包含 tools 和 toolResults）
+  // 注意：tools 只放在最后一条消息（currentMessage）的 userInputMessageContext 中
+  if (tools.length > 0 || toolResults.length > 0) {
+    currentUserInputMessage.userInputMessageContext = {}
+    if (tools.length > 0) {
+      currentUserInputMessage.userInputMessageContext.tools = tools
+    }
+    if (toolResults.length > 0) {
+      currentUserInputMessage.userInputMessageContext.toolResults = toolResults
+    }
+  }
+
+  // 构建 currentMessage
+  const currentMessage: KiroHistoryMessage = {
+    userInputMessage: currentUserInputMessage
+  }
+
+  // 清理并准备所有消息（history + currentMessage）
+  const allMessages = [...history, currentMessage]
+  const sanitizedMessages = sanitizeConversation(allMessages)
+  
+  // 分离 history 和 currentMessage
+  // currentMessage 是最后一条消息，history 是其余的
+  const sanitizedHistory = sanitizedMessages.slice(0, -1)
+  let finalCurrentMessage = sanitizedMessages.at(-1)!
+
+  // 确保 currentMessage 是 user 消息（sanitizeConversation 保证以 user 消息结束）
+  // 并确保包含 tools
+  if (!finalCurrentMessage.userInputMessage) {
+    // 如果清理后最后一条不是 user 消息，创建一个新的
+    finalCurrentMessage = {
+      userInputMessage: {
+        content: finalContent || 'Continue',
+        modelId,
+        origin
+      }
+    }
+  }
+  
+  // 确保 currentMessage 包含 tools
   if (tools.length > 0) {
-    userInputMessage.userInputMessageContext = {
+    finalCurrentMessage.userInputMessage!.userInputMessageContext = {
+      ...finalCurrentMessage.userInputMessage!.userInputMessageContext,
       tools
     }
   }
@@ -229,8 +379,9 @@ export function buildKiroPayload(
       chatTriggerType: 'MANUAL',
       conversationId: uuidv4(),
       currentMessage: {
-        userInputMessage
-      }
+        userInputMessage: finalCurrentMessage.userInputMessage!
+      },
+      history: sanitizedHistory.length > 0 ? sanitizedHistory : undefined
     }
   }
 
@@ -250,6 +401,16 @@ export function buildKiroPayload(
       payload.inferenceConfig.topP = inferenceConfig.topP
     }
   }
+
+  // 调试日志
+  console.log(`[KiroPayload] Built payload (native history mode):`, {
+    contentLength: finalContent.length,
+    originalHistoryLength: history.length,
+    sanitizedHistoryLength: sanitizedHistory.length,
+    toolsCount: tools.length,
+    toolResultsCount: toolResults.length,
+    hasProfileArn: !!profileArn
+  })
 
   return payload
 }
@@ -541,17 +702,36 @@ async function parseEventStream(
               // Tool use 完成
               if (isStop && currentToolUse) {
                 let finalInput: Record<string, unknown> = {}
+                let parseError = false
                 try {
                   if (currentToolUse.inputBuffer) {
+                    console.log('[Kiro] Tool input buffer:', currentToolUse.inputBuffer.substring(0, 200))
                     finalInput = JSON.parse(currentToolUse.inputBuffer)
+                    console.log('[Kiro] Parsed tool input:', JSON.stringify(finalInput).substring(0, 200))
                   }
-                } catch { /* 忽略解析错误 */ }
+                } catch (e) {
+                  parseError = true
+                  console.error('[Kiro] Failed to parse tool input:', e, 'Buffer:', currentToolUse.inputBuffer?.substring(0, 100))
+                  // 当 JSON 解析失败时，创建一个包含错误信息的 input
+                  // 这样客户端可以看到工具调用失败的原因
+                  finalInput = {
+                    _error: 'Tool input truncated by Kiro API (output token limit exceeded)',
+                    _partialInput: currentToolUse.inputBuffer?.substring(0, 500) || ''
+                  }
+                }
                 
+                // 只有在成功解析或有错误信息时才发送
                 onChunk('', {
                   toolUseId: currentToolUse.toolUseId,
                   name: currentToolUse.name,
                   input: finalInput
                 })
+                
+                // 如果解析失败，额外发送一条文本消息告知用户
+                if (parseError) {
+                  onChunk(`\n\n⚠️ Tool "${currentToolUse.name}" input was truncated by Kiro API. The output may be incomplete due to token limits.`)
+                }
+                
                 processedIds.add(currentToolUse.toolUseId)
                 currentToolUse = null
               }

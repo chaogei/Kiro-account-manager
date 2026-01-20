@@ -935,10 +935,12 @@ export class ProxyServer {
                       } : {})
                     }
                   },
-                  // 添加工具结果
+                  // 添加工具结果（作为 user 消息）
                   ...(toolResults.length > 0 ? [{
                     userInputMessage: {
-                      content: '',
+                      content: 'Tool results provided.',
+                      modelId,
+                      origin,
                       userInputMessageContext: {
                         toolResults
                       }
@@ -1038,32 +1040,42 @@ export class ProxyServer {
     account: { id: string; accessToken: string; profileArn?: string },
     kiroPayload: ReturnType<typeof claudeToKiro>,
     model: string,
-    startTime: number
+    startTime: number,
+    currentRound: number = 0,
+    messageId?: string,
+    headersSent: boolean = false,
+    contentBlockIndexStart: number = 0
   ): Promise<void> {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
-    })
+    if (!headersSent) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      })
+    }
 
-    const messageId = `msg_${uuidv4()}`
-    let contentBlockIndex = 0
+    const msgId = messageId || `msg_${uuidv4()}`
+    let contentBlockIndex = contentBlockIndexStart
     let hasStartedTextBlock = false
+    let collectedContent = ''
+    const pendingToolCalls: Map<string, { name: string; input: Record<string, unknown> }> = new Map()
 
-    // 发送 message_start
-    const messageStart = createClaudeStreamEvent('message_start', {
-      message: {
-        id: messageId,
-        type: 'message',
-        role: 'assistant',
-        content: [],
-        model,
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0 }
-      }
-    })
-    res.write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
+    // 发送 message_start（仅首轮）
+    if (currentRound === 0) {
+      const messageStart = createClaudeStreamEvent('message_start', {
+        message: {
+          id: msgId,
+          type: 'message',
+          role: 'assistant',
+          content: [],
+          model,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 }
+        }
+      })
+      res.write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
+    }
 
     return new Promise((resolve) => {
       callKiroApiStream(
@@ -1071,6 +1083,7 @@ export class ProxyServer {
         kiroPayload,
         (text, toolUse) => {
           if (text) {
+            collectedContent += text
             if (!hasStartedTextBlock) {
               // 开始文本块
               const blockStart = createClaudeStreamEvent('content_block_start', {
@@ -1095,6 +1108,8 @@ export class ProxyServer {
               contentBlockIndex++
               hasStartedTextBlock = false
             }
+            // 记录工具调用
+            pendingToolCalls.set(toolUse.toolUseId, { name: toolUse.name, input: toolUse.input })
             // 开始工具块
             const toolBlockStart = createClaudeStreamEvent('content_block_start', {
               index: contentBlockIndex,
@@ -1113,22 +1128,13 @@ export class ProxyServer {
             contentBlockIndex++
           }
         },
-        (usage) => {
+        async (usage) => {
           // 结束最后的文本块
           if (hasStartedTextBlock) {
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: contentBlockIndex })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+            contentBlockIndex++
           }
-          // 发送 message_delta
-          const messageDelta = createClaudeStreamEvent('message_delta', {
-            delta: { stop_reason: 'end_turn', stop_sequence: null } as any,
-            usage: { output_tokens: usage.outputTokens }
-          })
-          res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
-          // 发送 message_stop
-          const messageStop = createClaudeStreamEvent('message_stop')
-          res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
-          res.end()
 
           this.stats.successRequests++
           this.stats.totalTokens += usage.inputTokens + usage.outputTokens
@@ -1137,7 +1143,78 @@ export class ProxyServer {
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
           this.events.onResponse?.({ path: '/v1/messages', status: 200, tokens: usage.inputTokens + usage.outputTokens, credits: usage.credits })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: Date.now() - startTime, success: true })
-          resolve()
+
+          // 检查是否需要自动继续
+          const maxRounds = this.config.autoContinueRounds || 0
+          const hasToolCalls = pendingToolCalls.size > 0
+          const shouldContinue = hasToolCalls && maxRounds > 0 && currentRound < maxRounds
+
+          if (shouldContinue) {
+            console.log(`[ProxyServer] Claude auto-continue round ${currentRound + 1}/${maxRounds}`)
+            
+            // 构造继续请求
+            const toolResults = Array.from(pendingToolCalls.entries()).map(([toolId]) => ({
+              toolUseId: toolId,
+              content: [{ text: 'Done. Continue with the next step.' }],
+              status: 'success' as const
+            }))
+
+            const originalMsg = kiroPayload.conversationState?.currentMessage?.userInputMessage
+            const modelId = originalMsg?.modelId || 'anthropic.claude-sonnet-4-20250514-v1:0'
+            const origin = originalMsg?.origin || 'CHAT'
+
+            const continuePayload = {
+              ...kiroPayload,
+              conversationState: {
+                ...kiroPayload.conversationState,
+                currentMessage: {
+                  userInputMessage: {
+                    content: 'Continue.',
+                    userInputMessageContext: {
+                      toolResults
+                    },
+                    modelId,
+                    origin
+                  }
+                },
+                history: [
+                  ...(kiroPayload.conversationState?.history || []),
+                  {
+                    assistantResponseMessage: {
+                      content: collectedContent || 'I will continue with the task.',
+                      ...(pendingToolCalls.size > 0 ? {
+                        toolUses: Array.from(pendingToolCalls.entries()).map(([toolId, toolData]) => ({
+                          toolUseId: toolId,
+                          name: toolData.name,
+                          input: toolData.input
+                        }))
+                      } : {})
+                    }
+                  }
+                ]
+              }
+            } as typeof kiroPayload
+
+            try {
+              await this.handleClaudeStream(res, account, continuePayload, model, startTime, currentRound + 1, msgId, true, contentBlockIndex)
+            } catch (error) {
+              console.error('[ProxyServer] Claude auto-continue error:', error)
+            }
+            resolve()
+          } else {
+            // 发送 message_delta
+            const stopReason = hasToolCalls ? 'tool_use' : 'end_turn'
+            const messageDelta = createClaudeStreamEvent('message_delta', {
+              delta: { stop_reason: stopReason, stop_sequence: null } as any,
+              usage: { output_tokens: usage.outputTokens }
+            })
+            res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
+            // 发送 message_stop
+            const messageStop = createClaudeStreamEvent('message_stop')
+            res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
+            res.end()
+            resolve()
+          }
         },
         (error) => {
           console.error('[ProxyServer] Stream error:', error)
