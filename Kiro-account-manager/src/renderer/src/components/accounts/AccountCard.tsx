@@ -409,12 +409,12 @@ export const AccountCard = memo(function AccountCard({
   // 最终样式合并逻辑
   let finalStyle: React.CSSProperties = {}
   
-  if (isUnauthorized) {
-    // 封禁状态：忽略所有其他样式（标签光环、当前使用光环），只显示封禁样式
-    finalStyle = unauthorizedStyle
-  } else if (account.isActive) {
-    // 当前使用：叠加标签光环和当前使用光环
+  if (account.isActive) {
+    // 当前使用（包括封禁+当前使用）：流光边框 + 外发光，封禁通过角标显示
     finalStyle = { ...glowStyle, ...activeGlowStyle }
+  } else if (isUnauthorized) {
+    // 仅封禁状态：显示完整封禁样式
+    finalStyle = unauthorizedStyle
   } else {
     // 普通状态：只显示标签光环
     finalStyle = glowStyle
@@ -424,9 +424,9 @@ export const AccountCard = memo(function AccountCard({
     <Card
       className={cn(
         'relative transition-all duration-300 hover:shadow-lg cursor-pointer h-full flex flex-col overflow-hidden border',
-        // 边框颜色优先级
-        isUnauthorized ? 'border-red-400/50' :
+        // 边框颜色优先级：当前使用的流光边框优先于封禁边框
         account.isActive ? 'border-transparent active-glow-border' :
+        isUnauthorized ? 'border-red-400/50' :
         '',
         
         isSelected && !account.isActive && !isUnauthorized && 'bg-primary/5',
@@ -437,6 +437,10 @@ export const AccountCard = memo(function AccountCard({
       style={finalStyle}
       onClick={() => toggleSelection(account.id)}
     >
+      {/* 封禁角标 - 当前使用时显示在流光边框上 */}
+      {account.isActive && isUnauthorized && (
+        <div className="banned-badge" title={t('accounts.card.banned')} />
+      )}
       <CardContent className="p-4 flex-1 flex flex-col gap-3 overflow-hidden">
         {/* Header: Checkbox, Email/Nickname, Group */}
         <div className="flex gap-3 items-start">

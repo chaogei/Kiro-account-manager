@@ -15,11 +15,11 @@ protocols:
   name: Kiro Auth
   schemes:
     - kiro
-copyright: Copyright 2025 Kiro
+copyright: Copyright 2026 Kiro
 win:
   executableName: kiro-account-manager
   icon: resources/icon.ico
-  legalTrademarks: Copyright 2025 Kiro
+  legalTrademarks: Copyright 2026 Kiro
   requestedExecutionLevel: asInvoker
 nsis:
   artifactName: ${name}-${version}-${arch}-setup.${ext}

@@ -834,14 +834,25 @@ interface UsageLimitsResponse {
       freeTrialStatus?: string
       freeTrialExpiry?: string
     }
+    // REST API 直接返回 freeTrialInfo（与 freeTrialUsage 结构相同）
+    freeTrialInfo?: {
+      currentUsage?: number
+      currentUsageWithPrecision?: number
+      usageLimit?: number
+      usageLimitWithPrecision?: number
+      freeTrialStatus?: string
+      freeTrialExpiry?: number | string
+    }
     bonuses?: Array<{
       bonusCode?: string
       displayName?: string
+      description?: string
       usageLimit?: number
       usageLimitWithPrecision?: number
       currentUsage?: number
       currentUsageWithPrecision?: number
-      expiresAt?: string
+      expiresAt?: number | string  // REST API 返回数字时间戳
+      redeemedAt?: number | string
       status?: string
     }>
   }>
@@ -1015,16 +1026,32 @@ async function getUsageAndLimits(
         overageRate: b.overageRate,
         overageCap: b.overageCap,
         type: b.type,
-        // 转换 freeTrialUsage -> freeTrialInfo
-        freeTrialInfo: b.freeTrialUsage ? {
+        // REST API 直接返回 freeTrialInfo，CBOR API 返回 freeTrialUsage
+        freeTrialInfo: b.freeTrialInfo ? {
+          freeTrialStatus: b.freeTrialInfo.freeTrialStatus,
+          usageLimit: b.freeTrialInfo.usageLimit,
+          usageLimitWithPrecision: b.freeTrialInfo.usageLimitWithPrecision,
+          currentUsage: b.freeTrialInfo.currentUsage,
+          currentUsageWithPrecision: b.freeTrialInfo.currentUsageWithPrecision,
+          // REST API 返回数字时间戳，需要转换为 ISO 字符串
+          freeTrialExpiry: typeof b.freeTrialInfo.freeTrialExpiry === 'number' 
+            ? new Date(b.freeTrialInfo.freeTrialExpiry * 1000).toISOString() 
+            : b.freeTrialInfo.freeTrialExpiry
+        } : (b.freeTrialUsage ? {
           freeTrialStatus: b.freeTrialUsage.freeTrialStatus,
           usageLimit: b.freeTrialUsage.usageLimit,
           usageLimitWithPrecision: b.freeTrialUsage.usageLimitWithPrecision,
           currentUsage: b.freeTrialUsage.currentUsage,
           currentUsageWithPrecision: b.freeTrialUsage.currentUsageWithPrecision,
           freeTrialExpiry: b.freeTrialUsage.freeTrialExpiry
-        } : undefined,
-        bonuses: b.bonuses
+        } : undefined),
+        // 转换 bonuses 中的时间戳为 ISO 字符串
+        bonuses: b.bonuses?.map(bonus => ({
+          ...bonus,
+          expiresAt: typeof bonus.expiresAt === 'number' 
+            ? new Date(bonus.expiresAt * 1000).toISOString() 
+            : bonus.expiresAt
+        }))
       })),
       // REST API 返回的 nextDateReset 是 Unix 时间戳（秒），需要转换为 ISO 字符串
       nextDateReset: normalizeResetDate(result.nextDateReset),
@@ -1271,7 +1298,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     title: `Kiro 账号管理器 v${app.getVersion()}`,
     width: 1200,   // 刚好容纳 3 列卡片 (340*3 + 16*2 + 边距)
-    height: 1000,
+    height: 1100,
     minWidth: 800,
     minHeight: 600,
     show: false,

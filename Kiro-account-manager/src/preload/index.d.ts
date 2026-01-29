@@ -591,7 +591,7 @@ interface KiroApi {
   onProxyRequest: (callback: (info: { path: string; method: string; accountId?: string }) => void) => () => void
 
   // 监听反代响应事件
-  onProxyResponse: (callback: (info: { path: string; status: number; tokens?: number; credits?: number; error?: string }) => void) => () => void
+  onProxyResponse: (callback: (info: { path: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }) => void) => () => void
 
   // 监听反代错误事件
   onProxyError: (callback: (error: string) => void) => () => void

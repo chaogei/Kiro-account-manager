@@ -61,7 +61,7 @@ export function ProxyPanel() {
   const [availableCount, setAvailableCount] = useState(0)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [recentLogs, setRecentLogs] = useState<Array<{ time: string; path: string; status: number; tokens?: number; credits?: number; error?: string }>>([])
+  const [recentLogs, setRecentLogs] = useState<Array<{ time: string; path: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }>>([])
   const [isSyncing, setIsSyncing] = useState(false)
   const [isRefreshingModels, setIsRefreshingModels] = useState(false)
   const [syncSuccess, setSyncSuccess] = useState(false)
@@ -290,6 +290,8 @@ export function ProxyPanel() {
         path: info.path,
         status: info.status,
         tokens: info.tokens,
+        inputTokens: info.inputTokens,
+        outputTokens: info.outputTokens,
         credits: info.credits,
         error: info.error
       }, ...prev.slice(0, 99)]) // 保留最多 100 条
@@ -901,10 +903,12 @@ export function ProxyPanel() {
           <CardContent className="pt-2">
             <div className="max-h-[150px] overflow-y-auto text-xs font-mono space-y-0.5">
               {recentLogs.slice(0, 5).map((log, idx) => (
-                <div key={idx} className="grid grid-cols-5 gap-2 py-1 px-2 rounded hover:bg-muted/50 items-center">
-                  <span className="text-muted-foreground">{log.time}</span>
-                  <span className="truncate" title={log.path}>{log.path}</span>
+                <div key={idx} className="grid gap-2 py-1 px-2 rounded hover:bg-muted/50 items-center" style={{ gridTemplateColumns: '2fr 1.5fr 0.5fr 1fr 1fr 1fr 1fr' }}>
+                  <span className="text-muted-foreground whitespace-nowrap text-left">{log.time}</span>
+                  <span className="truncate text-left" title={log.path}>{log.path}</span>
                   <span className={`text-center ${log.status >= 400 ? 'text-red-500' : 'text-green-500'}`}>{log.status}</span>
+                  <span className="text-muted-foreground text-right">{log.inputTokens ? log.inputTokens.toLocaleString() : '-'}</span>
+                  <span className="text-muted-foreground text-right">{log.outputTokens ? log.outputTokens.toLocaleString() : '-'}</span>
                   <span className="text-muted-foreground text-right">{log.tokens ? log.tokens.toLocaleString() : '-'}</span>
                   <span className="text-muted-foreground text-right">{log.credits ? log.credits.toFixed(4) : '-'}</span>
                 </div>

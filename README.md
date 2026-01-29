@@ -271,7 +271,15 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
-### v1.4.6 (2025-01-29)
+### v1.4.7 (2025-01-29)
+- 📊 **Request Logs Token Detail**: Added Input/Output tokens columns to request logs table
+- 📊 **Recent Requests Enhancement**: Recent requests preview also shows Input/Output tokens
+- 📐 **Logs Dialog Width**: Increased request logs dialog width from 700px to 900px
+- 🔧 **Machine ID Page Fix**: Fixed copy/refresh buttons not responding to clicks
+- ✅ **Copy Feedback**: Machine ID page copy button now shows "Copied!" feedback
+- 🔄 **Refresh Animation**: Machine ID refresh button now shows spinning animation
+
+### v1.4.6 (2025-01-28)
 - 🔑 **Multi API Key Management**: Support creating multiple API Keys with selectable formats (sk-xxx / PROXY_KEY / KEY:TOKEN)
 - 💰 **Credits Limit**: Set independent Credits usage limit for each API Key
 - 📊 **API Key Usage Stats**: Track requests, Credits, and Tokens usage for each API Key

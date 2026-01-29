@@ -26,7 +26,7 @@ import {
 
 export interface ProxyServerEvents {
   onRequest?: (info: { path: string; method: string; accountId?: string }) => void
-  onResponse?: (info: { path: string; status: number; tokens?: number; credits?: number; error?: string }) => void
+  onResponse?: (info: { path: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }) => void
   onError?: (error: Error) => void
   onConfigChanged?: (config: ProxyConfig) => void  // API Key 用量更新时触发
   onStatusChange?: (running: boolean, port: number) => void
@@ -1045,7 +1045,7 @@ export class ProxyServer {
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
-        this.events.onResponse?.({ path: '/v1/chat/completions', status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens })
+        this.events.onResponse?.({ path: '/v1/chat/completions', status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
         this.recordRequest({ path: '/v1/chat/completions', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
         // 记录 API Key 用量
         if (matchedApiKey) {
@@ -1129,7 +1129,7 @@ export class ProxyServer {
           this.events.onCreditsUpdate?.(this.stats.totalCredits)
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
-          this.events.onResponse?.({ path: '/v1/chat/completions', status: 200, tokens: usage.inputTokens + usage.outputTokens, credits: usage.credits })
+          this.events.onResponse?.({ path: '/v1/chat/completions', status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits })
           this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: Date.now() - startTime, success: true })
           // 记录 API Key 用量
           if (matchedApiKey) {
@@ -1329,7 +1329,7 @@ export class ProxyServer {
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
-        this.events.onResponse?.({ path: '/v1/messages', status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens })
+        this.events.onResponse?.({ path: '/v1/messages', status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
         this.recordRequest({ path: '/v1/messages', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
       }
     } catch (error) {
@@ -1451,7 +1451,7 @@ export class ProxyServer {
           this.events.onCreditsUpdate?.(this.stats.totalCredits)
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
-          this.events.onResponse?.({ path: '/v1/messages', status: 200, tokens: usage.inputTokens + usage.outputTokens, credits: usage.credits })
+          this.events.onResponse?.({ path: '/v1/messages', status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: Date.now() - startTime, success: true })
           // 记录 API Key 用量
           if (matchedApiKey) {

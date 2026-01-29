@@ -21,7 +21,7 @@ except ImportError:
     print("安装: pip install cbor2")
 
 # 配置
-ACCESS_TOKEN = "aoaAAAAAGl6cv0H9tNr9nrHOI56pVdqz25ZJxBgAaDSLUQPzy7ts_ZQsRNVRa-UkJEzjEWWUU7hILyMT7KAWblrLYBkc0:MGUCMH0s5guyxZskhmKiiYb+cUFGc38nKszUliTeBEQ44PzaDvgosKptJ7U8YD1MaTHTugIxAMEvaiMkPmCQaJ5Fp9CAyfJ0hMq3S04GCj30YyKlOiSLlt0/Nocj28WQ6I72juFFiQ"  # 填写你的 access token，或使用环境变量
+ACCESS_TOKEN = "aoaAAAAAGl60C4ZNCC4CG_Dj5B21gx4OFvwTIoQhzF72839W08oG094YZYTVO5myKV735QugrLbC7MjeyZKeE0xGsBkc0:MGQCMANcDlPni1127DuN7uJ5g/8mSIvgmkLWFz3ylYAaSiCMjl9QIILBUBCkgV1S5r/kXgIwCdJAevOKCrOQ+ijLwPib+76+w7Q6oOWaU8k967p9olP6pdkF/fw55FU34BGrcSq7"  # 填写你的 access token，或使用环境变量
 IDP = "BuilderId"  # BuilderId, Github, Google
 PROFILE_ARN = ""  # 可选，格式: arn:aws:codewhisperer:us-east-1:123456789:profile/xxx
 

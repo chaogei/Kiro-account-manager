@@ -692,8 +692,8 @@ const api = {
   },
 
   // 监听反代响应事件
-  onProxyResponse: (callback: (info: { path: string; status: number; tokens?: number; credits?: number; error?: string }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, info: { path: string; status: number; tokens?: number; credits?: number; error?: string }): void => {
+  onProxyResponse: (callback: (info: { path: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, info: { path: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }): void => {
       callback(info)
     }
     ipcRenderer.on('proxy-response', handler)

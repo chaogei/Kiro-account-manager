@@ -7,6 +7,8 @@ interface LogEntry {
   path: string
   status: number
   tokens?: number
+  inputTokens?: number
+  outputTokens?: number
   credits?: number
   error?: string
 }
@@ -59,7 +61,7 @@ export function ProxyLogsDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => onOpenChange(false)} />
-      <Card className="relative w-[700px] max-h-[80vh] shadow-2xl border-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <Card className="relative w-[900px] max-h-[80vh] shadow-2xl border-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         <CardHeader className="pb-3 border-b sticky top-0 bg-background z-10">
           <div className="flex items-center justify-between">
             <CardTitle className="text-lg">{isEn ? 'Request Logs' : '请求日志'}</CardTitle>
@@ -116,6 +118,8 @@ export function ProxyLogsDialog({
                     <th className="text-left p-2 font-medium">{isEn ? 'Time' : '时间'}</th>
                     <th className="text-left p-2 font-medium">{isEn ? 'Path' : '路径'}</th>
                     <th className="text-center p-2 font-medium">{isEn ? 'Status' : '状态'}</th>
+                    <th className="text-center p-2 font-medium">{isEn ? 'In' : '输入'}</th>
+                    <th className="text-center p-2 font-medium">{isEn ? 'Out' : '输出'}</th>
                     <th className="text-right p-2 font-medium">Tokens</th>
                     <th className="text-right p-2 font-medium">Credits</th>
                   </tr>
@@ -154,6 +158,8 @@ export function ProxyLogsDialog({
                           </Badge>
                         )}
                       </td>
+                      <td className="p-2 text-center text-muted-foreground">{log.inputTokens ? log.inputTokens.toLocaleString() : '-'}</td>
+                      <td className="p-2 text-center text-muted-foreground">{log.outputTokens ? log.outputTokens.toLocaleString() : '-'}</td>
                       <td className="p-2 text-right text-muted-foreground">{log.tokens ? log.tokens.toLocaleString() : '-'}</td>
                       <td className="p-2 text-right text-muted-foreground">{log.credits ? log.credits.toFixed(6) : '-'}</td>
                     </tr>

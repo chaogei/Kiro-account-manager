@@ -384,3 +384,26 @@ body.dark[class*="theme-"] ::-webkit-scrollbar-thumb:hover {
     ) border-box;
   filter: brightness(1.1);
 }
+
+/* 封禁角标 */
+.banned-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 0 32px 32px 0;
+  border-color: transparent #ef4444 transparent transparent;
+  z-index: 10;
+}
+
+.banned-badge::after {
+  content: '!';
+  position: absolute;
+  top: 4px;
+  right: -26px;
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
+}

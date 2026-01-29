@@ -202,19 +202,21 @@ export function AccountToolbar({
           />
         </div>
 
-        {/* 主要操作按钮 */}
-        <Button onClick={onAddAccount}>
-          <Plus className="h-4 w-4 mr-1" />
-          {isEn ? 'Add' : '添加账号'}
-        </Button>
-        <Button variant="outline" onClick={onImport}>
-          <Upload className="h-4 w-4 mr-1" />
-          {isEn ? 'Import' : '导入'}
-        </Button>
-        <Button variant="outline" onClick={onExport}>
-          <Download className="h-4 w-4 mr-1" />
-          {isEn ? 'Export' : '导出'}
-        </Button>
+        {/* 主要操作按钮 - 右对齐 */}
+        <div className="flex items-center gap-2 ml-auto">
+          <Button onClick={onAddAccount}>
+            <Plus className="h-4 w-4 mr-1" />
+            {isEn ? 'Add' : '添加账号'}
+          </Button>
+          <Button variant="outline" onClick={onImport}>
+            <Upload className="h-4 w-4 mr-1" />
+            {isEn ? 'Import' : '导入'}
+          </Button>
+          <Button variant="outline" onClick={onExport}>
+            <Download className="h-4 w-4 mr-1" />
+            {isEn ? 'Export' : '导出'}
+          </Button>
+        </div>
       </div>
 
       {/* 统计和选择操作 */}
@@ -234,8 +236,8 @@ export function AccountToolbar({
           )}
         </div>
 
-        {/* 右侧：选择操作和管理 */}
-        <div className="flex items-center gap-2">
+        {/* 右侧：选择操作和管理 - 缩小间距 */}
+        <div className="flex items-center gap-1">
           {/* 分组下拉菜单 */}
           <div className="relative" ref={groupMenuRef}>
             <Button 
@@ -444,7 +446,7 @@ export function AccountToolbar({
             )}
           </div>
 
-          <div className="w-px h-6 bg-border mx-2" />
+          <div className="w-px h-6 bg-border mx-1" />
 
           {/* 批量操作 */}
           <Button
@@ -487,7 +489,7 @@ export function AccountToolbar({
             {isEn ? 'Refresh' : '刷新'}
           </Button>
 
-          <div className="w-px h-6 bg-border mx-2" />
+          <div className="w-px h-6 bg-border mx-1" />
 
           {/* 全选 */}
           <Button

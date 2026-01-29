@@ -54,6 +54,7 @@ export function MachineIdPage() {
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null)
   const [editingMachineId, setEditingMachineId] = useState('')
   const [accountSearchQuery, setAccountSearchQuery] = useState('')
+  const [copiedId, setCopiedId] = useState<string | null>(null)
 
   // 初始化
   useEffect(() => {
@@ -80,8 +81,10 @@ export function MachineIdPage() {
   }, [refreshCurrentMachineId])
 
   // 复制机器码到剪贴板
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = (text: string, id: string = 'default') => {
     navigator.clipboard.writeText(text)
+    setCopiedId(id)
+    setTimeout(() => setCopiedId(null), 1500)
   }
 
   // 随机生成并应用新机器码
@@ -304,8 +307,8 @@ export function MachineIdPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* 当前机器码 */}
         <Card className="group relative overflow-hidden hover:shadow-lg transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-primary/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-          <CardHeader className="pb-3">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-primary/10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+          <CardHeader className="pb-3 relative z-10">
             <CardTitle className="text-base flex items-center gap-2">
               <div className="p-1.5 rounded-lg bg-primary/10">
                 <Monitor className="h-4 w-4 text-primary" />
@@ -318,7 +321,7 @@ export function MachineIdPage() {
               )}
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 relative z-10">
             <div className="relative group/code">
               <div className="p-4 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 rounded-xl font-mono text-sm break-all border border-slate-200 dark:border-slate-700">
                 {isLoading ? (
@@ -341,17 +344,24 @@ export function MachineIdPage() {
               <Button 
                 variant="outline" 
                 size="sm" 
-                onClick={() => copyToClipboard(currentMachineId)}
+                onClick={() => copyToClipboard(currentMachineId, 'current')}
                 disabled={!currentMachineId}
                 className="flex-1"
               >
-                <Copy className="h-4 w-4 mr-1" />
-                {isEn ? 'Copy' : '复制'}
+                {copiedId === 'current' ? <Check className="h-4 w-4 mr-1 text-green-500" /> : <Copy className="h-4 w-4 mr-1" />}
+                {copiedId === 'current' ? (isEn ? 'Copied!' : '已复制') : (isEn ? 'Copy' : '复制')}
               </Button>
               <Button 
                 variant="outline" 
                 size="sm" 
-                onClick={() => refreshCurrentMachineId()}
+                onClick={async () => {
+                  setIsLoading(true)
+                  try {
+                    await refreshCurrentMachineId()
+                  } finally {
+                    setIsLoading(false)
+                  }
+                }}
                 disabled={isLoading}
                 className="flex-1"
               >
@@ -364,8 +374,8 @@ export function MachineIdPage() {
 
         {/* 原始机器码备份 */}
         <Card className="group relative overflow-hidden hover:shadow-lg transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-primary/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-          <CardHeader className="pb-3">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-primary/10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+          <CardHeader className="pb-3 relative z-10">
             <CardTitle className="text-base flex items-center gap-2">
               <div className="p-1.5 rounded-lg bg-primary/10">
                 <Shield className="h-4 w-4 text-primary" />
@@ -379,7 +389,7 @@ export function MachineIdPage() {
               )}
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 relative z-10">
             {originalMachineId ? (
               <>
                 <div className="p-4 bg-gradient-to-br from-primary/5 to-primary/10 rounded-xl font-mono text-sm break-all border border-primary/20">
@@ -393,11 +403,11 @@ export function MachineIdPage() {
                   <Button 
                     variant="outline" 
                     size="sm" 
-                    onClick={() => copyToClipboard(originalMachineId)}
+                    onClick={() => copyToClipboard(originalMachineId, 'original')}
                     className="flex-1"
                   >
-                    <Copy className="h-4 w-4 mr-1" />
-                    {isEn ? 'Copy' : '复制'}
+                    {copiedId === 'original' ? <Check className="h-4 w-4 mr-1 text-green-500" /> : <Copy className="h-4 w-4 mr-1" />}
+                    {copiedId === 'original' ? (isEn ? 'Copied!' : '已复制') : (isEn ? 'Copy' : '复制')}
                   </Button>
                   <Button 
                     variant="outline" 
