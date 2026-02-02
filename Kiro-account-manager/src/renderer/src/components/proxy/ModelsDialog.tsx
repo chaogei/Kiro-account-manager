@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { X, RefreshCw, Loader2, Cpu, FileText, Image, Hash, Sparkles, Zap } from 'lucide-react'
+import { X, RefreshCw, Loader2, Cpu, FileText, Image, Hash, Sparkles, Zap, Shuffle } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
 import { cn } from '@/lib/utils'
 
@@ -18,12 +18,16 @@ interface ModelsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   isEn: boolean
+  onOpenModelMapping?: () => void
+  mappingCount?: number
 }
 
 export function ModelsDialog({
   open,
   onOpenChange,
-  isEn
+  isEn,
+  onOpenModelMapping,
+  mappingCount = 0
 }: ModelsDialogProps) {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -89,6 +93,22 @@ export function ModelsDialog({
               </div>
             </CardTitle>
             <div className="flex items-center gap-2">
+              {onOpenModelMapping && (
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={onOpenModelMapping}
+                  className="rounded-lg"
+                >
+                  <Shuffle className="h-4 w-4" />
+                  <span className="ml-1.5">{isEn ? 'Mapping' : '映射'}</span>
+                  {mappingCount > 0 && (
+                    <Badge className="ml-1.5 h-5 px-1.5 bg-primary/20 text-primary text-xs">
+                      {mappingCount}
+                    </Badge>
+                  )}
+                </Button>
+              )}
               <Button 
                 variant="outline" 
                 size="sm" 

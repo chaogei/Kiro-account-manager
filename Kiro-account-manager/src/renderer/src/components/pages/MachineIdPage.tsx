@@ -323,7 +323,7 @@ export function MachineIdPage() {
           </CardHeader>
           <CardContent className="space-y-4 relative z-10">
             <div className="relative group/code">
-              <div className="p-4 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 rounded-xl font-mono text-sm break-all border border-slate-200 dark:border-slate-700">
+              <div className="p-4 bg-muted rounded-xl font-mono text-sm break-all border border-border text-foreground">
                 {isLoading ? (
                   <span className="text-muted-foreground flex items-center gap-2">
                     <RefreshCw className="h-4 w-4 animate-spin" />

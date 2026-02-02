@@ -271,6 +271,17 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
+### v1.4.9 (2025-02-02)
+- 🗺️ **AWS Region Expansion**: OIDC and online login AWS Regions expanded from 3 to 21, grouped by US/Europe/Asia Pacific/Other
+- 🗺️ **AWS Region Custom Input**: Added custom input field for manual entry of unlisted regions (e.g., cn-north-1)
+- 🔀 **Model Mapping Feature**: New model mapping management with replace, alias, and load balance modes
+- 🎯 **Model Mapping Rules**: Support wildcard * matching, weight configuration, and per-API-Key rule settings
+- � **Official Model List**: Model mapping auto-fetches Kiro official models for easy target selection
+- 📝 **Model Mapping UI**: Added source/target model field descriptions for clarity
+- �💻 **Win11 Machine ID Optimization**: Triple fallback for machine ID retrieval (reg query → PowerShell → WMIC)
+- 🔐 **Admin Privilege Detection**: Enhanced detection (PowerShell WindowsPrincipal → net session)
+- 🌙 **Dark Mode Fix**: Fixed machine ID page display area background color in dark mode
+
 ### v1.4.8 (2025-01-29)
 - 📊 **Request Logs Model Column**: Added model column to request logs table and recent requests preview
 - 🧠 **Thinking Tag Conversion**: Detect &lt;thinking&gt; tags in regular responses and convert based on config

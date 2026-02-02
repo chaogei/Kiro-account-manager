@@ -292,6 +292,25 @@ export interface ApiKey {
   usageHistory?: ApiKeyUsageRecord[]
 }
 
+// 模型映射规则
+export interface ModelMappingRule {
+  id: string
+  name: string  // 规则名称
+  enabled: boolean
+  // 映射类型：replace(替换), alias(别名), loadbalance(负载均衡)
+  type: 'replace' | 'alias' | 'loadbalance'
+  // 源模型（用户请求的模型名，支持通配符 *）
+  sourceModel: string
+  // 目标模型列表（负载均衡时随机选择）
+  targetModels: string[]
+  // 负载均衡权重（可选，默认平均）
+  weights?: number[]
+  // 优先级（数字越小优先级越高）
+  priority: number
+  // 适用的 API Key ID 列表（空表示全局）
+  apiKeyIds?: string[]
+}
+
 export interface ProxyConfig {
   enabled: boolean
   port: number
@@ -323,6 +342,8 @@ export interface ProxyConfig {
   modelThinkingMode?: Record<string, boolean>
   // 思考内容输出格式：reasoning_content / thinking / think
   thinkingOutputFormat?: 'reasoning_content' | 'thinking' | 'think'
+  // 模型映射规则
+  modelMappings?: ModelMappingRule[]
 }
 
 export interface TlsConfig {

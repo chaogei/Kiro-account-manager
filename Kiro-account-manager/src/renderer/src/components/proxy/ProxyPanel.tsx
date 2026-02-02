@@ -6,6 +6,7 @@ import { useTranslation } from '../../hooks/useTranslation'
 import { ProxyLogsDialog } from './ProxyLogsDialog'
 import { ProxyDetailedLogsDialog } from './ProxyDetailedLogsDialog'
 import { ModelsDialog } from './ModelsDialog'
+import { ModelMappingDialog } from './ModelMappingDialog'
 import { AccountSelectDialog } from './AccountSelectDialog'
 import { ApiKeyManager } from './ApiKeyManager'
 import { createPortal } from 'react-dom'
@@ -28,11 +29,31 @@ interface SessionStats {
   startTime: number
 }
 
+interface ModelMappingRule {
+  id: string
+  name: string
+  enabled: boolean
+  type: 'replace' | 'alias' | 'loadbalance'
+  sourceModel: string
+  targetModels: string[]
+  weights?: number[]
+  priority: number
+  apiKeyIds?: string[]
+}
+
+interface ApiKeyInfo {
+  id: string
+  name: string
+  key: string
+  enabled: boolean
+}
+
 interface ProxyConfig {
   enabled: boolean
   port: number
   host: string
   apiKey?: string
+  apiKeys?: ApiKeyInfo[]
   enableMultiAccount: boolean
   selectedAccountId?: string
   logRequests: boolean
@@ -42,6 +63,7 @@ interface ProxyConfig {
   autoContinueRounds?: number
   disableTools?: boolean
   autoSwitchOnQuotaExhausted?: boolean
+  modelMappings?: ModelMappingRule[]
 }
 
 export function ProxyPanel() {
@@ -69,6 +91,8 @@ export function ProxyPanel() {
   const [showLogsDialog, setShowLogsDialog] = useState(false)
   const [showDetailedLogsDialog, setShowDetailedLogsDialog] = useState(false)
   const [showModelsDialog, setShowModelsDialog] = useState(false)
+  const [showModelMappingDialog, setShowModelMappingDialog] = useState(false)
+  const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([])
   const [showAccountSelectDialog, setShowAccountSelectDialog] = useState(false)
   const [showApiKeyManager, setShowApiKeyManager] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -1019,6 +1043,34 @@ export function ProxyPanel() {
         open={showModelsDialog}
         onOpenChange={setShowModelsDialog}
         isEn={isEn}
+        onOpenModelMapping={async () => {
+          // 获取可用模型列表
+          try {
+            const result = await window.api.proxyGetModels()
+            if (result.success && result.models) {
+              setAvailableModels(result.models.map((m: { id: string; name?: string }) => ({ id: m.id, name: m.name || m.id })))
+            }
+          } catch {
+            // 忽略错误
+          }
+          setShowModelsDialog(false)
+          setShowModelMappingDialog(true)
+        }}
+        mappingCount={config.modelMappings?.length || 0}
+      />
+
+      {/* 模型映射弹窗 */}
+      <ModelMappingDialog
+        open={showModelMappingDialog}
+        onOpenChange={setShowModelMappingDialog}
+        isEn={isEn}
+        mappings={config.modelMappings || []}
+        onMappingsChange={(mappings) => {
+          setConfig(prev => ({ ...prev, modelMappings: mappings }))
+          window.api.proxyUpdateConfig({ modelMappings: mappings })
+        }}
+        apiKeys={(config.apiKeys || []).map(k => ({ id: k.id, name: k.name }))}
+        availableModels={availableModels}
       />
 
       {/* 账号选择弹窗 */}

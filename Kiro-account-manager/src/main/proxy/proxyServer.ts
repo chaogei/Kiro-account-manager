@@ -678,6 +678,60 @@ export class ProxyServer {
     this.events.onConfigChanged?.(this.config)
   }
 
+  // 应用模型映射
+  private applyModelMapping(requestedModel: string, apiKeyId?: string): string {
+    const mappings = this.config.modelMappings
+    if (!mappings || mappings.length === 0) return requestedModel
+
+    // 按优先级排序（数字越小优先级越高）
+    const sortedMappings = [...mappings].sort((a, b) => a.priority - b.priority)
+
+    for (const rule of sortedMappings) {
+      // 检查规则是否启用
+      if (!rule.enabled) continue
+
+      // 检查是否适用于当前 API Key
+      if (rule.apiKeyIds && rule.apiKeyIds.length > 0 && apiKeyId) {
+        if (!rule.apiKeyIds.includes(apiKeyId)) continue
+      }
+
+      // 检查源模型是否匹配（支持通配符 *）
+      const sourcePattern = rule.sourceModel.replace(/\*/g, '.*')
+      const regex = new RegExp(`^${sourcePattern}$`, 'i')
+      if (!regex.test(requestedModel)) continue
+
+      // 匹配成功，根据类型选择目标模型
+      const validTargets = rule.targetModels.filter(t => t.trim())
+      if (validTargets.length === 0) continue
+
+      let targetModel: string
+
+      if (rule.type === 'loadbalance' && validTargets.length > 1) {
+        // 负载均衡：根据权重随机选择
+        const weights = rule.weights || validTargets.map(() => 1)
+        const totalWeight = weights.reduce((a, b) => a + b, 0)
+        let random = Math.random() * totalWeight
+        let selectedIndex = 0
+        for (let i = 0; i < weights.length; i++) {
+          random -= weights[i]
+          if (random <= 0) {
+            selectedIndex = i
+            break
+          }
+        }
+        targetModel = validTargets[selectedIndex]
+      } else {
+        // replace 或 alias：直接使用第一个目标
+        targetModel = validTargets[0]
+      }
+
+      proxyLogger.info('ProxyServer', `Model mapping applied: ${requestedModel} -> ${targetModel} (rule: ${rule.name}, type: ${rule.type})`)
+      return targetModel
+    }
+
+    return requestedModel
+  }
+
   // 处理请求
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const path = req.url || '/'
@@ -997,6 +1051,9 @@ export class ProxyServer {
     const body = await this.readBody(req)
     const request: OpenAIChatRequest = JSON.parse(body)
     const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+
+    // 应用模型映射
+    request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
 
     // 检查是否为该模型默认启用思考模式
     const modelThinkingEnabled = this.config.modelThinkingMode?.[request.model]
@@ -1391,6 +1448,9 @@ export class ProxyServer {
     const body = await this.readBody(req)
     const request: ClaudeRequest = JSON.parse(body)
     const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+
+    // 应用模型映射
+    request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
 
     // 检查是否为该模型默认启用思考模式
     const modelThinkingEnabled = this.config.modelThinkingMode?.[request.model]

@@ -117,13 +117,30 @@ export async function checkAdminPrivilege(): Promise<boolean> {
   try {
     switch (osType) {
       case 'windows':
-        // 尝试写入系统目录来检测权限
+        // 方法1: 使用 PowerShell 检查（最可靠）
         try {
-          execSync('net session', { stdio: 'ignore' })
+          const result = execSync(
+            'powershell -NoProfile -Command "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"',
+            { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] }
+          )
+          const isAdmin = result.trim().toLowerCase() === 'true'
+          console.log('[MachineId] PowerShell admin check result:', isAdmin)
+          return isAdmin
+        } catch (error) {
+          console.log('[MachineId] PowerShell admin check failed:', error instanceof Error ? error.message : error)
+        }
+        
+        // 方法2: 尝试 net session（备用）
+        try {
+          execSync('net session', { stdio: 'ignore', timeout: 3000 })
+          console.log('[MachineId] net session succeeded, has admin')
           return true
         } catch {
-          return false
+          console.log('[MachineId] net session failed, no admin')
         }
+        
+        return false
+        
       case 'macos':
         // macOS 上写入用户目录不需要管理员权限
         // 我们直接返回 true，因为可以写入 ~/Library/Application Support/
@@ -226,20 +243,54 @@ function isValidMachineId(machineId: string): boolean {
 // ==================== Windows ====================
 
 async function getWindowsMachineId(): Promise<MachineIdResult> {
+  // 方法1: 使用 reg query 命令
   try {
     const { stdout } = await execAsync(
-      'reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid'
+      'reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid',
+      { timeout: 5000 }
     )
     const match = stdout.match(/MachineGuid\s+REG_SZ\s+([a-f0-9-]+)/i)
     if (match && match[1]) {
       return { success: true, machineId: match[1].toLowerCase() }
     }
-    return { success: false, error: '无法解析机器码' }
   } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : '获取Windows机器码失败'
+    console.log('[MachineId] reg query failed, trying PowerShell:', error instanceof Error ? error.message : error)
+  }
+
+  // 方法2: 使用 PowerShell 读取注册表（某些 Win11 环境下更可靠）
+  try {
+    const { stdout } = await execAsync(
+      'powershell -NoProfile -Command "(Get-ItemProperty -Path \'HKLM:\\SOFTWARE\\Microsoft\\Cryptography\' -Name MachineGuid).MachineGuid"',
+      { timeout: 10000 }
+    )
+    const machineId = stdout.trim().toLowerCase()
+    if (machineId && isValidMachineId(machineId)) {
+      return { success: true, machineId }
     }
+  } catch (error) {
+    console.log('[MachineId] PowerShell failed, trying WMIC:', error instanceof Error ? error.message : error)
+  }
+
+  // 方法3: 使用 WMIC 获取 UUID（备用方案）
+  try {
+    const { stdout } = await execAsync(
+      'wmic csproduct get UUID',
+      { timeout: 5000 }
+    )
+    const lines = stdout.split('\n').filter(line => line.trim() && !line.includes('UUID'))
+    if (lines.length > 0) {
+      const uuid = lines[0].trim().toLowerCase()
+      if (uuid && uuid !== 'ffffffff-ffff-ffff-ffff-ffffffffffff') {
+        return { success: true, machineId: uuid }
+      }
+    }
+  } catch (error) {
+    console.log('[MachineId] WMIC failed:', error instanceof Error ? error.message : error)
+  }
+
+  return {
+    success: false,
+    error: '无法获取机器码，请尝试以管理员身份运行或检查系统权限设置'
   }
 }
 
