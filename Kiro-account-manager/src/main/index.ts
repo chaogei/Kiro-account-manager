@@ -1550,8 +1550,24 @@ async function createWindow(): Promise<void> {
         const isDark = nativeTheme.shouldUseDarkColors
         console.log('[Theme] System theme changed to:', isDark ? 'dark' : 'light')
         
-        // 更新窗口背景颜色以保持云母效果
-        mainWindow?.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+        // 重新应用窗口材质效果（如果已设置）
+        try {
+          const savedData = store?.get('accountData') as any
+          const savedMaterial = savedData?.windowMaterial ?? 'none'
+          
+          if (savedMaterial !== 'none' && typeof mainWindow?.setBackgroundMaterial === 'function') {
+            // 如果设置了云母/亚克力效果，重新应用
+            mainWindow.setBackgroundMaterial(savedMaterial)
+            console.log('[Theme] Reapplied backgroundMaterial after theme change:', savedMaterial)
+          } else {
+            // 如果没有设置材质效果，只更新背景颜色
+            mainWindow?.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+          }
+        } catch (error) {
+          console.error('[Theme] Failed to reapply material after theme change:', error)
+          // 降级到只更新背景颜色
+          mainWindow?.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+        }
         
         // 通知渲染进程
         mainWindow?.webContents.send('system-theme-changed', isDark)
@@ -1830,12 +1846,29 @@ app.whenReady().then(async () => {
   ipcMain.handle('set-native-theme', (_event, theme: 'light' | 'dark' | 'system') => {
     nativeTheme.themeSource = theme
     
-    // 更新窗口背景颜色以保持云母效果
+    // 重新应用窗口材质效果（如果已设置）
     if (process.platform === 'win32' && mainWindow) {
       const isDark = theme === 'system' 
         ? nativeTheme.shouldUseDarkColors 
         : theme === 'dark'
-      mainWindow.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+      
+      try {
+        const savedData = store?.get('accountData') as any
+        const savedMaterial = savedData?.windowMaterial ?? 'none'
+        
+        if (savedMaterial !== 'none' && typeof mainWindow.setBackgroundMaterial === 'function') {
+          // 如果设置了云母/亚克力效果，重新应用
+          mainWindow.setBackgroundMaterial(savedMaterial)
+          console.log('[Theme] Reapplied backgroundMaterial after manual theme change:', savedMaterial)
+        } else {
+          // 如果没有设置材质效果，只更新背景颜色
+          mainWindow.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+        }
+      } catch (error) {
+        console.error('[Theme] Failed to reapply material after manual theme change:', error)
+        // 降级到只更新背景颜色
+        mainWindow.setBackgroundColor(isDark ? '#1e1e1e' : '#ffffff')
+      }
     }
     
     return { success: true }
