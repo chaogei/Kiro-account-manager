@@ -491,16 +491,17 @@ export interface ProxyConfig {
   tls?: TlsConfig
   // 自动启动
   autoStart?: boolean
-  // 工具调用后自动继续（最大轮数）
-  autoContinueRounds?: number
-  enableServerSideToolAutoContinue?: boolean
   clientDrivenToolExecution?: boolean
   // 禁用工具调用（移除 tools 参数）
   disableTools?: boolean
   // Payload 大小限制（KB），超过时截断工具结果（byte 维度）
   payloadSizeLimitKB?: number
-  // Token buffer reserve（为 model context window 预留余量，effective limit = model.maxInputTokens - buffer）
-  // 默认 50K 适配所有 ctx_window 模型（200K → 150K, 1M → 950K），无需按模型手动调
+  // Token buffer reserve 开关（默认 false = 完全跳过 trimHistoryByTokens）
+  // 关闭时后端不再裁剪任何旧消息，超出 context window 由 Kiro 后端原样返回错误
+  enableTokenBufferReserve?: boolean
+  // Token buffer reserve（仅在 enableTokenBufferReserve=true 时生效）
+  // effective limit = model.maxInputTokens - buffer
+  // 默认 20K：覆盖 system + tools + current message + output + 估算偏差
   tokenBufferReserve?: number
   // 单账号模式下额度耗尽自动切换到下一个账号
   autoSwitchOnQuotaExhausted?: boolean

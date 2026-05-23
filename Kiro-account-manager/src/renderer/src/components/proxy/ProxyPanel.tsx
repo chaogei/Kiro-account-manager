@@ -72,11 +72,10 @@ interface ProxyConfig {
   maxRetries?: number
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
   autoStart?: boolean
-  autoContinueRounds?: number
-  enableServerSideToolAutoContinue?: boolean
   clientDrivenToolExecution?: boolean
   disableTools?: boolean
   payloadSizeLimitKB?: number
+  enableTokenBufferReserve?: boolean
   tokenBufferReserve?: number
   autoSwitchOnQuotaExhausted?: boolean
   accountSelectionStrategy?: 'round-robin' | 'sticky'
@@ -173,8 +172,7 @@ export function ProxyPanel() {
         const clientDrivenToolExecution = cfg.clientDrivenToolExecution !== false
         setConfig({
           ...cfg,
-          clientDrivenToolExecution,
-          enableServerSideToolAutoContinue: clientDrivenToolExecution ? false : cfg.enableServerSideToolAutoContinue
+          clientDrivenToolExecution
         })
       }
       if (result.stats) {
@@ -252,8 +250,6 @@ export function ProxyPanel() {
         apiKey: config.apiKey,
         enableMultiAccount: config.enableMultiAccount,
         logRequests: config.logRequests,
-        autoContinueRounds: config.autoContinueRounds,
-        enableServerSideToolAutoContinue: config.clientDrivenToolExecution === false ? config.enableServerSideToolAutoContinue : false,
         clientDrivenToolExecution: config.clientDrivenToolExecution !== false,
         disableTools: config.disableTools
       })
@@ -836,49 +832,13 @@ export function ProxyPanel() {
                     id="clientDrivenToolExecution"
                     checked={config.clientDrivenToolExecution !== false}
                     onCheckedChange={(checked) => {
-                      setConfig(prev => ({
-                        ...prev,
-                        clientDrivenToolExecution: checked,
-                        enableServerSideToolAutoContinue: checked ? false : prev.enableServerSideToolAutoContinue
-                      }))
-                      window.api.proxyUpdateConfig({
-                        clientDrivenToolExecution: checked,
-                        ...(checked ? { enableServerSideToolAutoContinue: false } : {})
-                      })
+                      setConfig(prev => ({ ...prev, clientDrivenToolExecution: checked }))
+                      window.api.proxyUpdateConfig({ clientDrivenToolExecution: checked })
                     }}
                     disabled={isRunning}
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">{isEn ? 'Recommended for OpenCode and Claude Code. Disable only when the proxy should fabricate tool results and continue server-side.' : '推荐用于 OpenCode 和 Claude Code。仅在需要代理伪造工具结果并服务端继续时关闭。'}</p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="autoContinueRounds">{isEn ? 'Auto Continue Rounds' : '自动继续轮数'}</Label>
-                <div className="flex items-center justify-between h-9 px-3 rounded-md border border-input bg-transparent">
-                  <span className="text-sm text-muted-foreground">{isEn ? 'Server-side tool auto continue' : '服务端工具自动继续'}</span>
-                  <Switch
-                    id="enableServerSideToolAutoContinue"
-                    checked={config.enableServerSideToolAutoContinue || false}
-                    onCheckedChange={(checked) => {
-                      setConfig(prev => ({ ...prev, enableServerSideToolAutoContinue: checked }))
-                      window.api.proxyUpdateConfig({ enableServerSideToolAutoContinue: checked })
-                    }}
-                    disabled={isRunning || config.clientDrivenToolExecution !== false}
-                  />
-                </div>
-                <Input
-                  id="autoContinueRounds"
-                  type="number"
-                  min={0}
-                  max={20}
-                  value={config.autoContinueRounds || 0}
-                  onChange={(e) => {
-                    const rounds = parseInt(e.target.value) || 0
-                    setConfig(prev => ({ ...prev, autoContinueRounds: rounds }))
-                    window.api.proxyUpdateConfig({ autoContinueRounds: rounds })
-                  }}
-                  disabled={isRunning || !config.enableServerSideToolAutoContinue || config.clientDrivenToolExecution !== false}
-                />
-                <p className="text-xs text-muted-foreground">{isEn ? 'Disabled by default for API compatibility. Enable only when you want the proxy to auto-send "Continue" after tool calls.' : '为保证 API 兼容性默认禁用。仅在需要代理自动发送“继续”时启用。'}</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="disableTools">{isEn ? 'Disable Tool Calls' : '禁用工具调用'}</Label>
@@ -915,21 +875,33 @@ export function ProxyPanel() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="tokenBufferReserve">{isEn ? 'Token Buffer Reserve (auto-trim history)' : 'Token Buffer 预留 (自动裁旧 history)'}</Label>
+                <div className="flex items-center justify-between h-9 px-3 rounded-md border border-input bg-transparent">
+                  <span className="text-sm text-muted-foreground">{isEn ? 'Enable auto-trim oldest history' : '启用自动裁剪最旧 history'}</span>
+                  <Switch
+                    id="enableTokenBufferReserve"
+                    checked={config.enableTokenBufferReserve || false}
+                    onCheckedChange={(checked) => {
+                      setConfig(prev => ({ ...prev, enableTokenBufferReserve: checked }))
+                      window.api.proxyUpdateConfig({ enableTokenBufferReserve: checked })
+                    }}
+                    disabled={isRunning}
+                  />
+                </div>
                 <Input
                   id="tokenBufferReserve"
                   type="number"
                   min={5000}
                   max={150000}
                   step={1000}
-                  value={config.tokenBufferReserve || 50000}
+                  value={config.tokenBufferReserve || 20000}
                   onChange={(e) => {
-                    const tokens = parseInt(e.target.value) || 50000
+                    const tokens = parseInt(e.target.value) || 20000
                     setConfig(prev => ({ ...prev, tokenBufferReserve: tokens }))
                     window.api.proxyUpdateConfig({ tokenBufferReserve: tokens })
                   }}
-                  disabled={isRunning}
+                  disabled={isRunning || !config.enableTokenBufferReserve}
                 />
-                <p className="text-xs text-muted-foreground">{isEn ? 'Tokens reserved below the model context window. Effective trim threshold = model.maxInputTokens - buffer. Default 50K works for all models (200K → trim at 150K, 1M → trim at 950K). Covers system + tools + current message + output + estimation bias.' : '从模型 context window 中预留的 token 余量。有效裁剪阈值 = model.maxInputTokens - buffer。默认 50K 适配所有模型（200K 模型→150K 裁剪，1M 模型→950K 裁剪）。覆盖 system + tools + current message + output + 估算偏差。'}</p>
+                <p className="text-xs text-muted-foreground">{isEn ? 'Disabled by default. When enabled, reserves N tokens below the model context window; effective trim threshold = model.maxInputTokens - buffer (e.g. 200K → trim at 180K, 1M → trim at 980K). When disabled, the proxy never trims history and forwards CONTENT_LENGTH_EXCEEDS_THRESHOLD errors as-is.' : '默认关闭。开启后从模型 context window 中预留 N 个 token，有效裁剪阈值 = model.maxInputTokens - buffer（例：200K → 180K 裁剪，1M → 980K 裁剪）。关闭时后端不再裁剪任何旧消息，超出上下文由 Kiro 后端原样返回 CONTENT_LENGTH_EXCEEDS_THRESHOLD 错误。'}</p>
               </div>
             </div>
           </div>

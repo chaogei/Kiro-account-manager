@@ -1,4 +1,5 @@
 import { ModuleClient, SessionClient } from 'tlsclientwrapper'
+import { fetch as undiciFetch, ProxyAgent, type RequestInit as UndiciRequestInit } from 'undici'
 import { RegistrationConfig } from './config'
 import { BrowserIdentity, randomIdentity } from './browser-identity'
 import { FingerprintContext, newFPContext, resetPerfTiming, generateFingerprint } from './fingerprint'
@@ -147,6 +148,24 @@ export class Registrar {
       this.moduleClient = null
     }
     await this.initTlsClient()
+  }
+
+  /**
+   * 用 undici 直接 fetch 静态资源（如 AWS signin app.js），绕过 tls-client。
+   * 原因：tls-client 的 dll 是进程级单例，失败请求会污染其全局状态，
+   * 导致后续重建 SessionClient 后仍报 "no tls client for modification check"。
+   * 静态资源不需要 TLS 指纹伪装，直接用 Node/undici fetch 即可。
+   */
+  private async fetchAppJS(url: string, init?: RequestInit): Promise<Response> {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy
+      || process.env.HTTP_PROXY || process.env.http_proxy
+      || getSystemProxy() || undefined
+    if (proxyUrl) {
+      const agent = new ProxyAgent({ uri: proxyUrl, requestTls: { rejectUnauthorized: false } })
+      const resp = await undiciFetch(url, { ...(init as UndiciRequestInit), dispatcher: agent })
+      return resp as unknown as Response
+    }
+    return await fetch(url, init)
   }
 
   private isRecoverableTlsClientError(err: unknown): boolean {
@@ -1041,10 +1060,7 @@ export class Registrar {
   async run(): Promise<RegistrationResult> {
     try {
       await this.initTlsClient()
-      await refreshAppJSConfig(async (url, init) => {
-        const resp = await this.doGet(url, (init?.headers as Record<string, string>) || {})
-        return new Response(resp.body, { status: resp.status })
-      })
+      await refreshAppJSConfig((url, init) => this.fetchAppJS(url, init))
       await this.rebuildTlsClient()
 
       const initSteps: Array<{ name: string; fn: StepFn }> = [
@@ -1137,10 +1153,7 @@ export class Registrar {
   async runManualPhase1(): Promise<{ success: boolean; error?: string }> {
     try {
       await this.initTlsClient()
-      await refreshAppJSConfig(async (url, init) => {
-        const resp = await this.doGet(url, (init?.headers as Record<string, string>) || {})
-        return new Response(resp.body, { status: resp.status })
-      })
+      await refreshAppJSConfig((url, init) => this.fetchAppJS(url, init))
       await this.rebuildTlsClient()
 
       await this.step1OIDC()

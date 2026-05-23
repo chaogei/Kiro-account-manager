@@ -16,7 +16,7 @@ import {
   type KProxyConfig,
   type DeviceIdMapping
 } from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve } from './proxy/kiroApi'
 import { getSystemProxy } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
@@ -191,14 +191,39 @@ const KIRO_AUTH_ENDPOINT = 'https://prod.us-east-1.auth.desktop.kiro.dev'
 
 // ============ 代理设置 ============
 
+/**
+ * 规范化代理 URL，确保 protocol://host:port 格式。
+ * 容错处理用户常见的格式错误：
+ *   http:127.0.0.1:7890     → http://127.0.0.1:7890   (缺 //)
+ *   http:/127.0.0.1:7890    → http://127.0.0.1:7890   (单 /)
+ *   127.0.0.1:7890          → http://127.0.0.1:7890   (无 protocol)
+ *   http://127.0.0.1:7890   → http://127.0.0.1:7890   (已规范)
+ */
+export function normalizeProxyUrl(url: string): string {
+  const trimmed = (url || '').trim()
+  if (!trimmed) return ''
+  // 已是标准 protocol:// 前缀
+  if (/^[a-z][a-z0-9+\-.]*:\/\//i.test(trimmed)) return trimmed
+  // 有 protocol: 但缺/少 //
+  const m = trimmed.match(/^([a-z][a-z0-9+\-.]*):(\/*)(.+)$/i)
+  if (m) return `${m[1]}://${m[3]}`
+  // 无 protocol，默认 http
+  return `http://${trimmed}`
+}
+
 // 设置代理环境变量
 function applyProxySettings(enabled: boolean, url: string): void {
   if (enabled && url) {
-    process.env.HTTP_PROXY = url
-    process.env.HTTPS_PROXY = url
-    process.env.http_proxy = url
-    process.env.https_proxy = url
-    console.log(`[Proxy] Enabled: ${url}`)
+    const normalized = normalizeProxyUrl(url)
+    process.env.HTTP_PROXY = normalized
+    process.env.HTTPS_PROXY = normalized
+    process.env.http_proxy = normalized
+    process.env.https_proxy = normalized
+    if (normalized !== url) {
+      console.log(`[Proxy] Enabled: ${normalized} (规范化自: ${url})`)
+    } else {
+      console.log(`[Proxy] Enabled: ${normalized}`)
+    }
   } else {
     delete process.env.HTTP_PROXY
     delete process.env.HTTPS_PROXY
@@ -279,8 +304,9 @@ function initProxyServer(): ProxyServer {
     maxRetries: 3,
     retryDelayMs: 1000,
     tokenRefreshBeforeExpiry: 300, // 5分钟提前刷新
-    enableServerSideToolAutoContinue: false,
-    clientDrivenToolExecution: true
+    clientDrivenToolExecution: true,
+    enableTokenBufferReserve: false,
+    tokenBufferReserve: 20000
   }
   
   // 合并保存的配置和默认配置
@@ -290,7 +316,8 @@ function initProxyServer(): ProxyServer {
   if (config.payloadSizeLimitKB) {
     setPayloadSizeLimitKB(config.payloadSizeLimitKB)
   }
-  // 恢复 Token buffer reserve
+  // 恢复 Token buffer reserve（开关 + 数值）
+  setEnableTokenBufferReserve(config.enableTokenBufferReserve === true)
   if (config.tokenBufferReserve) {
     setTokenBufferReserve(config.tokenBufferReserve)
   }
@@ -4423,21 +4450,22 @@ app.whenReady().then(async () => {
 
   // IPC: 设置代理
   ipcMain.handle('set-proxy', async (_event, enabled: boolean, url: string) => {
-    console.log(`[IPC] set-proxy called: enabled=${enabled}, url=${url}`)
+    const normalizedUrl = enabled && url ? normalizeProxyUrl(url) : url
+    console.log(`[IPC] set-proxy called: enabled=${enabled}, url=${normalizedUrl}${normalizedUrl !== url ? ` (原始: ${url})` : ''}`)
     try {
       applyProxySettings(enabled, url)
       
       // 同时设置 Electron 的 session 代理
       if (mainWindow) {
         const session = mainWindow.webContents.session
-        if (enabled && url) {
-          await session.setProxy({ proxyRules: url })
+        if (enabled && normalizedUrl) {
+          await session.setProxy({ proxyRules: normalizedUrl })
         } else {
           await session.setProxy({ proxyRules: '' })
         }
       }
       
-      return { success: true }
+      return { success: true, normalizedUrl }
     } catch (error) {
       console.error('[Proxy] Failed to set proxy:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
@@ -4989,7 +5017,10 @@ app.whenReady().then(async () => {
       if (config.payloadSizeLimitKB !== undefined) {
         setPayloadSizeLimitKB(config.payloadSizeLimitKB)
       }
-      // 同步 Token buffer reserve
+      // 同步 Token buffer reserve（开关 + 数值）
+      if (config.enableTokenBufferReserve !== undefined) {
+        setEnableTokenBufferReserve(config.enableTokenBufferReserve)
+      }
       if (config.tokenBufferReserve !== undefined) {
         setTokenBufferReserve(config.tokenBufferReserve)
       }

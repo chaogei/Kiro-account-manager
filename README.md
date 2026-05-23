@@ -272,6 +272,42 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ## 📋 Changelog
 
 
+### v1.6.8 (2026-5-23)
+
+#### Token Counting Precision Refactor
+- **New**: Standalone `tokenCounter.ts` module — encapsulates `js-tiktoken` `cl100k_base` encoder and `getModelContextLength` function, unifying all token computation logic
+- **New**: Multi-tier precision chain — Kiro backend `tokenUsage` real value > `contextUsageEvent` percentage reverse calculation (`modelCtx × percentage / 100`) > `tiktoken` precise count > character-based fallback (input 0.42, output 0.4)
+- **Optimization**: Input token estimation error reduced from ~30% to ~5% (Sonnet 4.5 measured 17871 → 19608, perfectly aligned with official 12.7% contextUsage)
+- **Optimization**: Output token statistics now accumulate `assistantResponseEvent` / `codeEvent` text and apply tiktoken, no longer relying on character length
+- **New**: `getModelContextLength` 3-tier lookup chain — Kiro `fetchKiroModels`'s real `maxInputTokens` cache first → fuzzy match (`claude-sonnet-4.5` ↔ `claude-sonnet-4-5-20251001`) → keyword fallback (sonnet/haiku/opus/gpt-4 etc.)
+- **New**: AmazonQ CLI endpoint `CodeEvent` parsing support — fixes lost streaming code content on this endpoint
+- **Optimization**: `parseEventStream` signature extended with `modelId` and `payloadStr` parameters for end-to-end model context propagation enabling contextUsage reverse calculation
+- **Fixed**: Removed duplicate `modelContextWindowCache` definition in `kiroApi.ts`; unified import and re-export from `tokenCounter.ts` for backward compatibility
+
+#### Token Buffer Reserve Toggle (Off by Default)
+- **Changed**: ⚠️ **`tokenBufferReserve` behavior change** — v1.6.7 force-enabled 50K reserve; v1.6.8 makes it an opt-in toggle, **off by default**, default value lowered to 20K when enabled
+- **New**: `enableTokenBufferReserve` standalone switch — new field in `ProxyConfig`, frontend UI adds inline Switch control
+- **Behavior**: When off, `trimHistoryByTokens` is **completely skipped**; `CONTENT_LENGTH_EXCEEDS_THRESHOLD` from Kiro backend is forwarded as-is to the client
+- **Behavior**: When on, effective limit = `model.maxInputTokens - tokenBufferReserve` (200K → 180K, 1M → 980K, range 5K~150K)
+- **UI**: Number input `disable` condition extended with `!enableTokenBufferReserve` — input auto-greys when switch off; all related controls locked while server is running
+- **Compat**: Existing 50K values in stored config are preserved (still in 5K~150K range), but won't trigger trimming because the switch is off by default; users must manually enable
+
+#### Proxy URL Tolerance
+- **New**: `normalizeProxyUrl` utility — auto-normalizes user-input non-standard proxy URLs (e.g. `http:127.0.0.1:7890` missing `//`, `127.0.0.1:7890` missing scheme, leading/trailing whitespace) into standard `http://host:port` format
+- **Optimization**: Environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`), Electron `session.setProxy`, and frontend UI now consistently use the normalized URL, avoiding proxy failure or duplicate setup
+- **Optimization**: IPC `set-proxy` returns `normalizedUrl` to frontend store, auto-writing back to UI input for visual confirmation
+
+#### Feature Trim
+- **Removed**: "Auto Continue Rounds / Server-side tool auto continue" full feature chain — 14 references cleared (frontend UI controls, `ProxyConfig` fields, IPC `proxyStart`/`proxyUpdateConfig` type signatures, backend OpenAI `handleOpenAIStream` and Claude `handleClaudeStream` auto-continue branches)
+- **Behavior**: Stream tool calls now return `tool_calls` / `tool_use` directly to client after completion; client decides what to do next, no more server-side "fake continue" recursive call path
+- **Rationale**: This feature conflicted with mainstream API clients (Cline / Roo / Cursor / Claude Code) tool execution loops, and was mutually exclusive with the recommended `clientDrivenToolExecution=true` configuration; long unused
+
+#### Bug Fixes
+- **Fix**: 🔥 `electron-builder` build error `ENOENT: no such file or directory, rename 'electron.exe' -> 'kiro-account-manager.exe'` — root cause was incomplete `electron-v38.7.2-win32-x64.zip` download from npmmirror corrupting the Electron binary; switched to BITS download from `cdn.npmmirror.com/binaries/electron/` for full zip
+- **Fix**: Registration `app.js` download triggers `RangeError: init["status"] must be in the range of 200 to 599, inclusive.` — `tlsclientwrapper` returned `status=0/undefined` on network errors, triggering `new Response()` validation exception. Switched to `undici fetch` for static resources to bypass tls-client and avoid polluting its global state
+- **Fix**: OIDC registration fails with `failed to build client out of request input: failed to modify existing client: no tls client for modification check` when proxy enabled — `app.js` download failure polluted the tls-client DLL global state, causing subsequent `SessionClient` initialization to fail. Auto-resolved by the `app.js` undici fix above
+- **Fix**: Frontend `setProxy` changed to async function — awaits normalized URL from IPC and writes back to store for display, preventing UI/effective value mismatch
+
 ### v1.6.7 (2026-5-23)
 
 #### Account Suspension Handling (NEW)

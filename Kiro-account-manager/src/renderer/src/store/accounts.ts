@@ -220,7 +220,7 @@ interface AccountsActions {
   setUsagePrecision: (enabled: boolean) => void
 
   // 代理设置
-  setProxy: (enabled: boolean, url?: string) => void
+  setProxy: (enabled: boolean, url?: string) => Promise<void>
 
   // 主题设置
   setTheme: (theme: string) => void
@@ -1452,9 +1452,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         // 应用主题
         get().applyTheme()
 
-        // 如果代理已启用，通知主进程
+        // 如果代理已启用，通过 store 的 setProxy（会自动 normalize URL 并回写 UI）
         if (data.proxyEnabled && data.proxyUrl) {
-          window.api.setProxy?.(true, data.proxyUrl)
+          void get().setProxy(true, data.proxyUrl)
         }
 
         // 如果自动换号已启用，启动定时器
@@ -1601,14 +1601,23 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // ==================== 代理设置 ====================
 
-  setProxy: (enabled, url) => {
+  setProxy: async (enabled, url) => {
+    const targetUrl = url ?? get().proxyUrl
     set({ 
       proxyEnabled: enabled,
-      proxyUrl: url ?? get().proxyUrl
+      proxyUrl: targetUrl
     })
     get().saveToStorage()
-    // 通知主进程更新代理设置
-    window.api.setProxy?.(enabled, url ?? get().proxyUrl)
+    // 通知主进程更新代理设置，并用规范化后的 URL 回写 store
+    try {
+      const result = await window.api.setProxy?.(enabled, targetUrl)
+      if (result?.normalizedUrl && result.normalizedUrl !== targetUrl) {
+        set({ proxyUrl: result.normalizedUrl })
+        get().saveToStorage()
+      }
+    } catch (err) {
+      console.error('[Store] setProxy IPC failed:', err)
+    }
   },
 
   // ==================== 主题设置 ====================

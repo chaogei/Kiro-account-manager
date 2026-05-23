@@ -370,7 +370,7 @@ const api = {
   },
 
   // 代理设置
-  setProxy: (enabled: boolean, url: string): Promise<{ success: boolean; error?: string }> => {
+  setProxy: (enabled: boolean, url: string): Promise<{ success: boolean; error?: string; normalizedUrl?: string }> => {
     return ipcRenderer.invoke('set-proxy', enabled, url)
   },
 
@@ -589,7 +589,7 @@ const api = {
   // ============ Kiro API 反代服务器 ============
 
   // 启动反代服务器
-  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; autoContinueRounds?: number; enableServerSideToolAutoContinue?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }): Promise<{ success: boolean; port?: number; error?: string }> => {
+  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }): Promise<{ success: boolean; port?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-start', config)
   },
 
@@ -634,7 +634,7 @@ const api = {
   },
 
   // 更新反代服务器配置
-  proxyUpdateConfig: (config: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; selectedAccountIds?: string[]; logRequests?: boolean; autoStart?: boolean; maxRetries?: number; preferredEndpoint?: 'codewhisperer' | 'amazonq'; autoContinueRounds?: number; enableServerSideToolAutoContinue?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; payloadSizeLimitKB?: number; autoSwitchOnQuotaExhausted?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think'; modelMappings?: Array<{ id: string; name: string; enabled: boolean; type: 'replace' | 'alias' | 'loadbalance'; sourceModel: string; targetModels: string[]; weights?: number[]; priority: number; apiKeyIds?: string[] }> }): Promise<{ success: boolean; config?: unknown; error?: string }> => {
+  proxyUpdateConfig: (config: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; selectedAccountIds?: string[]; logRequests?: boolean; autoStart?: boolean; maxRetries?: number; preferredEndpoint?: 'codewhisperer' | 'amazonq'; clientDrivenToolExecution?: boolean; disableTools?: boolean; payloadSizeLimitKB?: number; enableTokenBufferReserve?: boolean; tokenBufferReserve?: number; autoSwitchOnQuotaExhausted?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think'; modelMappings?: Array<{ id: string; name: string; enabled: boolean; type: 'replace' | 'alias' | 'loadbalance'; sourceModel: string; targetModels: string[]; weights?: number[]; priority: number; apiKeyIds?: string[] }> }): Promise<{ success: boolean; config?: unknown; error?: string }> => {
     return ipcRenderer.invoke('proxy-update-config', config)
   },
 

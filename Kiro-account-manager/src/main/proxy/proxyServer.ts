@@ -302,7 +302,6 @@ export class ProxyServer {
       retryDelayMs: 1000,
       tokenRefreshBeforeExpiry: 300, // 5分钟提前刷新
       autoStart: false, // 是否自动启动
-      enableServerSideToolAutoContinue: false,
       clientDrivenToolExecution: true,
       ...config
     }
@@ -2247,107 +2246,33 @@ export class ProxyServer {
             this.recordApiKeyUsage(matchedApiKey.id, usage.credits || 0, usage.inputTokens, usage.outputTokens, model, '/v1/chat/completions')
           }
 
-          // 检查是否需要自动继续
-          const maxRounds = this.config.autoContinueRounds || 0
+          // 发送结束 chunk（包含完整 usage 信息）
           const hasToolCalls = pendingToolCalls.size > 0
-          const shouldContinue = this.config.clientDrivenToolExecution !== true && this.config.enableServerSideToolAutoContinue === true && hasToolCalls && maxRounds > 0 && currentRound < maxRounds
-
-          if (shouldContinue) {
-            console.log(`[ProxyServer] Auto-continue round ${currentRound + 1}/${maxRounds}`)
-            
-            // 构造继续请求：添加 assistant 响应、工具结果和继续消息
-            const toolResults = Array.from(pendingToolCalls.entries()).map(([toolId]) => ({
-              toolUseId: toolId,
-              content: [{ text: 'Done. Continue with the next step.' }]
-            }))
-
-            // 获取原始消息的 modelId 和 origin
-            const originalMsg = kiroPayload.conversationState?.currentMessage?.userInputMessage
-            const modelId = originalMsg?.modelId || 'anthropic.claude-sonnet-4-20250514-v1:0'
-            const origin = originalMsg?.origin || 'CHAT'
-
-            // 构造新的 Kiro payload
-            const continuePayload = {
-              ...kiroPayload,
-              conversationState: {
-                ...kiroPayload.conversationState,
-                currentMessage: {
-                  userInputMessage: {
-                    content: 'Continue.',
-                    userInputMessageContext: {},
-                    modelId,
-                    origin
-                  }
-                },
-                history: [
-                  ...(kiroPayload.conversationState?.history || []),
-                  // 添加 assistant 响应
-                  {
-                    assistantResponseMessage: {
-                      content: collectedContent || 'I will continue with the task.',
-                      ...(pendingToolCalls.size > 0 ? {
-                        toolUses: Array.from(pendingToolCalls.entries()).map(([toolId, toolData]) => ({
-                          toolUseId: toolId,
-                          name: toolData.name,
-                          input: JSON.parse(toolData.arguments)
-                        }))
-                      } : {})
-                    }
-                  },
-                  // 添加工具结果（作为 user 消息）
-                  ...(toolResults.length > 0 ? [{
-                    userInputMessage: {
-                      content: 'Tool results provided.',
-                      modelId,
-                      origin,
-                      userInputMessageContext: {
-                        toolResults
-                      }
-                    }
-                  }] : [])
-                ]
-              }
-            } as typeof kiroPayload
-
-            // 递归调用继续流式输出
-            try {
-              await this.handleOpenAIStream(res, account, continuePayload, model, startTime, currentRound + 1, id, true, matchedApiKey, toolNameRegistry, signal)
-            } catch (error) {
-              if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
-                resolve()
-                return
-              }
-              console.error('[ProxyServer] Auto-continue error:', error)
-            }
-            resolve()
-          } else {
-            // 发送结束 chunk（包含完整 usage 信息）
-            const finishReason = hasToolCalls ? 'tool_calls' : 'stop'
-            const usageInfo: {
-              prompt_tokens: number
-              completion_tokens: number
-              total_tokens: number
-              prompt_tokens_details?: { cached_tokens?: number }
-              completion_tokens_details?: { reasoning_tokens?: number }
-            } = {
-              prompt_tokens: usage.inputTokens,
-              completion_tokens: usage.outputTokens,
-              total_tokens: usage.inputTokens + usage.outputTokens
-            }
-            // 添加 cache tokens 详情
-            if (usage.cacheReadTokens && usage.cacheReadTokens > 0) {
-              usageInfo.prompt_tokens_details = { cached_tokens: usage.cacheReadTokens }
-            }
-            // 添加 reasoning tokens 详情
-            if (usage.reasoningTokens && usage.reasoningTokens > 0) {
-              usageInfo.completion_tokens_details = { reasoning_tokens: usage.reasoningTokens }
-            }
-            const finalChunk = createOpenaiStreamChunk(id, model, {}, finishReason, usageInfo)
-            res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-            res.write('data: [DONE]\n\n')
-            res.end()
-            resolve()
+          const finishReason = hasToolCalls ? 'tool_calls' : 'stop'
+          const usageInfo: {
+            prompt_tokens: number
+            completion_tokens: number
+            total_tokens: number
+            prompt_tokens_details?: { cached_tokens?: number }
+            completion_tokens_details?: { reasoning_tokens?: number }
+          } = {
+            prompt_tokens: usage.inputTokens,
+            completion_tokens: usage.outputTokens,
+            total_tokens: usage.inputTokens + usage.outputTokens
           }
+          // 添加 cache tokens 详情
+          if (usage.cacheReadTokens && usage.cacheReadTokens > 0) {
+            usageInfo.prompt_tokens_details = { cached_tokens: usage.cacheReadTokens }
+          }
+          // 添加 reasoning tokens 详情
+          if (usage.reasoningTokens && usage.reasoningTokens > 0) {
+            usageInfo.completion_tokens_details = { reasoning_tokens: usage.reasoningTokens }
+          }
+          const finalChunk = createOpenaiStreamChunk(id, model, {}, finishReason, usageInfo)
+          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+          res.write('data: [DONE]\n\n')
+          res.end()
+          resolve()
         },
         (error) => {
           if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
@@ -2742,85 +2667,23 @@ export class ProxyServer {
             this.recordApiKeyUsage(matchedApiKey.id, usage.credits || 0, usage.inputTokens, usage.outputTokens, model, '/v1/messages')
           }
 
-          // 检查是否需要自动继续
-          const maxRounds = this.config.autoContinueRounds || 0
-          const hasToolCalls = pendingToolCalls.size > 0
-          const shouldContinue = this.config.clientDrivenToolExecution !== true && this.config.enableServerSideToolAutoContinue === true && hasToolCalls && maxRounds > 0 && currentRound < maxRounds
-
-          if (shouldContinue) {
-            console.log(`[ProxyServer] Claude auto-continue round ${currentRound + 1}/${maxRounds}`)
-            
-            // 构造继续请求
-            const toolResults = Array.from(pendingToolCalls.entries()).map(([toolId]) => ({
-              toolUseId: toolId,
-              content: [{ text: 'Done. Continue with the next step.' }],
-              status: 'success' as const
-            }))
-
-            const originalMsg = kiroPayload.conversationState?.currentMessage?.userInputMessage
-            const modelId = originalMsg?.modelId || 'anthropic.claude-sonnet-4-20250514-v1:0'
-            const origin = originalMsg?.origin || 'CHAT'
-
-            const continuePayload = {
-              ...kiroPayload,
-              conversationState: {
-                ...kiroPayload.conversationState,
-                currentMessage: {
-                  userInputMessage: {
-                    content: 'Continue.',
-                    userInputMessageContext: {
-                      toolResults
-                    },
-                    modelId,
-                    origin
-                  }
-                },
-                history: [
-                  ...(kiroPayload.conversationState?.history || []),
-                  {
-                    assistantResponseMessage: {
-                      content: collectedContent || 'I will continue with the task.',
-                      ...(pendingToolCalls.size > 0 ? {
-                        toolUses: Array.from(pendingToolCalls.entries()).map(([toolId, toolData]) => ({
-                          toolUseId: toolId,
-                          name: toolData.name,
-                          input: toolData.input
-                        }))
-                      } : {})
-                    }
-                  }
-                ]
-              }
-            } as typeof kiroPayload
-
-            try {
-              await this.handleClaudeStream(res, account, continuePayload, model, startTime, currentRound + 1, id, true, currentBlockIndex, matchedApiKey, toolNameRegistry, signal)
-            } catch (error) {
-              if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
-                resolve()
-                return
-              }
-              console.error('[ProxyServer] Claude auto-continue error:', error)
-            }
-            resolve()
-          } else {
-            // 成功后更新 prompt cache tracker
-            if (simulatedCacheUsage?.cacheProfile && simulatedCacheUsage?.accountId) {
-              promptCacheTracker.update(simulatedCacheUsage.accountId, simulatedCacheUsage.cacheProfile as any)
-            }
-            // 发送 message_delta（包含完整 usage 信息）
-            const stopReason = hasToolCalls ? 'tool_use' : 'end_turn'
-            const messageDelta = createClaudeStreamEvent('message_delta', {
-              delta: { stop_reason: stopReason, stop_sequence: null } as any,
-              usage: this.buildClaudeUsage(usage, simulatedCacheUsage)
-            })
-            res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
-            // 发送 message_stop
-            const messageStop = createClaudeStreamEvent('message_stop')
-            res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
-            res.end()
-            resolve()
+          // 成功后更新 prompt cache tracker
+          if (simulatedCacheUsage?.cacheProfile && simulatedCacheUsage?.accountId) {
+            promptCacheTracker.update(simulatedCacheUsage.accountId, simulatedCacheUsage.cacheProfile as any)
           }
+          // 发送 message_delta（包含完整 usage 信息）
+          const hasToolCalls = pendingToolCalls.size > 0
+          const stopReason = hasToolCalls ? 'tool_use' : 'end_turn'
+          const messageDelta = createClaudeStreamEvent('message_delta', {
+            delta: { stop_reason: stopReason, stop_sequence: null } as any,
+            usage: this.buildClaudeUsage(usage, simulatedCacheUsage)
+          })
+          res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
+          // 发送 message_stop
+          const messageStop = createClaudeStreamEvent('message_stop')
+          res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
+          res.end()
+          resolve()
         },
         (error) => {
           if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {

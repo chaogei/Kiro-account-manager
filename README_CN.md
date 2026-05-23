@@ -272,6 +272,42 @@ npx electron-builder --linux --arm64
 ## 📋 更新日志
 
 
+### v1.6.8 (2026-5-23)
+
+#### Token 计量精度重构
+- **新增**: `tokenCounter.ts` 独立模块 — 封装 `js-tiktoken` 的 `cl100k_base` 编码器与 `getModelContextLength` 函数，统一处理所有 token 计算逻辑
+- **新增**: 多级精度链路 — Kiro 后端 `tokenUsage` 真实值 > `contextUsageEvent` 百分比反推（`modelCtx × percentage / 100`）> `tiktoken` 精算 > 字符系数兜底（input 0.42、output 0.4）
+- **优化**: 输入 token 估算精度从 ~30% 偏差降至 ~5%（Sonnet 4.5 实测 17871 → 19608，与官方 12.7% contextUsage 完美对齐）
+- **优化**: 输出 token 统计改为累积 `assistantResponseEvent` / `codeEvent` 文本后用 tiktoken 精算，不再依赖输出字符长度
+- **新增**: `getModelContextLength` 三级查找链 — Kiro `fetchKiroModels` 返回的真实 `maxInputTokens` 缓存优先 → 模糊匹配（`claude-sonnet-4.5` ↔ `claude-sonnet-4-5-20251001`）→ 关键词兜底（sonnet/haiku/opus/gpt-4 等）
+- **新增**: AmazonQ CLI 端点 `CodeEvent` 解析支持 — 修复该端点流式输出代码内容丢失的问题
+- **优化**: `parseEventStream` 签名扩展，接收 `modelId` 与 `payloadStr` 参数，端到端贯通模型上下文供 contextUsage 反推使用
+- **修复**: `kiroApi.ts` 中重复定义的 `modelContextWindowCache` 移除，统一从 `tokenCounter.ts` 导入并 re-export 保持向后兼容
+
+#### Token Buffer Reserve 开关化（默认关闭）
+- **变更**: ⚠️ **`tokenBufferReserve` 行为变更** — v1.6.7 强制启用预留 50K，v1.6.8 改为可选开关，**默认关闭**，开启时默认值降为 20K
+- **新增**: `enableTokenBufferReserve` 独立开关 — `ProxyConfig` 新增字段，前端 UI 加内嵌 Switch 控件
+- **行为**: 关闭时 `trimHistoryByTokens` **完全跳过**，超出 context window 由 Kiro 后端直接返回 `CONTENT_LENGTH_EXCEEDS_THRESHOLD` 错误，反代原样转发给客户端
+- **行为**: 开启时 effective limit = `model.maxInputTokens - tokenBufferReserve`（200K → 180K, 1M → 980K，取值范围 5K~150K）
+- **UI**: 数字输入框 disable 条件追加 `!enableTokenBufferReserve` — 开关关闭时输入框自动置灰；运行中所有相关控件锁定
+- **兼容**: 存量配置中 50K 等历史值会保留（仍在 5K~150K 区间），但因开关默认 false 不会立即触发裁剪，用户需手动开启
+
+#### 代理 URL 容错
+- **新增**: `normalizeProxyUrl` 工具函数 — 自动规范化用户输入的非标准代理 URL（如 `http:127.0.0.1:7890` 缺 `//`、`127.0.0.1:7890` 缺协议、首尾空格等）统一补齐为标准 `http://host:port` 格式
+- **优化**: 环境变量（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`）、Electron `session.setProxy`、前端 UI 三处统一使用规范化后的 URL，避免代理失效或重复设置
+- **优化**: IPC `set-proxy` 返回 `normalizedUrl` 给前端 store，自动回写到 UI 输入框显示规范化结果
+
+#### 功能精简
+- **移除**: 「自动继续轮数 / 服务端工具自动继续」完整功能链路 — 14 处引用清零（前端 UI 控件、`ProxyConfig` 字段、IPC `proxyStart`/`proxyUpdateConfig` 类型签名、后端 OpenAI `handleOpenAIStream` 与 Claude `handleClaudeStream` 流式 auto-continue 触发分支）
+- **行为**: 流式工具调用走完后直接返回 `tool_calls` / `tool_use` 给客户端，由客户端决定后续动作，不再有服务端「伪造继续」的递归调用路径
+- **理由**: 该功能与主流 API 客户端（Cline / Roo / Cursor / Claude Code）的工具执行循环冲突，且与 `clientDrivenToolExecution=true`（推荐配置）互斥，长期不被使用
+
+#### Bug 修复
+- **修复**: 🔥 `electron-builder` 构建报错 `ENOENT: no such file or directory, rename 'electron.exe' -> 'kiro-account-manager.exe'` — 根因为 npmmirror 镜像下载的 `electron-v38.7.2-win32-x64.zip` 不完整导致 Electron 二进制损坏，改用 BITS 从 `cdn.npmmirror.com/binaries/electron/` 下载完整 zip 解决
+- **修复**: 注册流程 `app.js` 下载触发 `RangeError: init["status"] must be in the range of 200 to 599, inclusive.` — `tlsclientwrapper` 在网络错误时返回 `status=0/undefined`，触发 `new Response()` 校验异常。改用 `undici fetch` 直接获取静态资源 `app.js`，绕过 tls-client 避免污染其全局状态
+- **修复**: 启用代理后 OIDC 注册失败 `failed to build client out of request input: failed to modify existing client: no tls client for modification check` — `app.js` 下载失败连带污染了 tls-client DLL 全局状态，后续 `SessionClient` 初始化失败。`app.js` 改用 undici 后该问题自动消除
+- **修复**: 前端 `setProxy` 改为 async 函数 — 等待 IPC 返回规范化后的 URL 并回写 store 显示，避免 UI 与实际生效值不一致
+
 ### v1.6.7 (2026-5-23)
 
 #### 账号封禁处理 (核心新功能)

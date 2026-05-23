@@ -401,7 +401,7 @@ interface KiroApi {
   onSocialAuthCallback: (callback: (data: { code?: string; state?: string; error?: string }) => void) => () => void
 
   // 代理设置
-  setProxy: (enabled: boolean, url: string) => Promise<{ success: boolean; error?: string }>
+  setProxy: (enabled: boolean, url: string) => Promise<{ success: boolean; error?: string; normalizedUrl?: string }>
 
   // ============ 机器码管理 API ============
 
@@ -539,7 +539,7 @@ interface KiroApi {
   // ============ Kiro API 反代服务器 ============
 
   // 启动反代服务器
-  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; autoContinueRounds?: number; enableServerSideToolAutoContinue?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }) => Promise<{ success: boolean; port?: number; error?: string }>
+  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }) => Promise<{ success: boolean; port?: number; error?: string }>
 
   // 停止反代服务器
   proxyStop: () => Promise<{ success: boolean; error?: string }>
@@ -566,7 +566,7 @@ interface KiroApi {
   proxyGetLogsCount: () => Promise<number>
 
   // 更新反代服务器配置
-  proxyUpdateConfig: (config: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; selectedAccountIds?: string[]; logRequests?: boolean; logStreamEvents?: boolean; autoStart?: boolean; maxRetries?: number; preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'; autoContinueRounds?: number; enableServerSideToolAutoContinue?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; payloadSizeLimitKB?: number; tokenBufferReserve?: number; autoSwitchOnQuotaExhausted?: boolean; accountSelectionStrategy?: 'round-robin' | 'sticky'; modelMappings?: Array<{ id: string; name: string; enabled: boolean; type: 'replace' | 'alias' | 'loadbalance'; sourceModel: string; targetModels: string[]; weights?: number[]; priority: number; apiKeyIds?: string[] }> }) => Promise<{ success: boolean; config?: unknown; error?: string }>
+  proxyUpdateConfig: (config: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; selectedAccountIds?: string[]; logRequests?: boolean; logStreamEvents?: boolean; autoStart?: boolean; maxRetries?: number; preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'; clientDrivenToolExecution?: boolean; disableTools?: boolean; payloadSizeLimitKB?: number; enableTokenBufferReserve?: boolean; tokenBufferReserve?: number; autoSwitchOnQuotaExhausted?: boolean; accountSelectionStrategy?: 'round-robin' | 'sticky'; modelMappings?: Array<{ id: string; name: string; enabled: boolean; type: 'replace' | 'alias' | 'loadbalance'; sourceModel: string; targetModels: string[]; weights?: number[]; priority: number; apiKeyIds?: string[] }> }) => Promise<{ success: boolean; config?: unknown; error?: string }>
 
   // 添加账号到反代池
   proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }) => Promise<{ success: boolean; accountCount?: number; error?: string }>

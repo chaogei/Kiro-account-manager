@@ -18,6 +18,14 @@ import type {
 import { proxyLogger } from './logger'
 import { getKProxyService } from '../kproxy'
 import { getSystemProxy } from './systemProxy'
+import {
+  countTokens,
+  getModelContextLength,
+  setModelContextWindow,
+  getModelContextWindow
+} from './tokenCounter'
+// 重新导出以保持向后兼容（proxyServer.ts 等模块仍 from './kiroApi' 导入）
+export { setModelContextWindow, getModelContextWindow }
 
 // 是否使用 K-Proxy 代理发送 API 请求（从主进程导入）
 let useKProxyForApi = false
@@ -37,9 +45,20 @@ export function setPayloadSizeLimitKB(limitKB: number): void {
   payloadSizeLimitKB = Math.max(256, Math.min(10240, limitKB))
 }
 
-// Token buffer reserve（为 model context window 预留的余量，覆盖 system + tools + current + output + 估算偏差 + schema 开销）
-// 默认 50K：适配所有 ctx_window 模型 (200K → effective 150K, 1M → effective 950K)
-let tokenBufferReserve = 50000
+// Token buffer reserve 开关（默认 false = 完全跳过 trimHistoryByTokens）
+// 关闭时后端不再裁剪任何旧消息，超出 context window 由 Kiro 后端原样返回错误
+let enableTokenBufferReserve = false
+export function setEnableTokenBufferReserve(enabled: boolean): void {
+  enableTokenBufferReserve = !!enabled
+}
+export function getEnableTokenBufferReserve(): boolean {
+  return enableTokenBufferReserve
+}
+
+// Token buffer reserve（仅在 enableTokenBufferReserve=true 时生效）
+// 为 model context window 预留的余量，覆盖 system + tools + current + output + 估算偏差 + schema 开销
+// 默认 20K：开关启用后的合理初始值（200K → effective 180K, 1M → effective 980K）
+let tokenBufferReserve = 20000
 export function setTokenBufferReserve(tokens: number): void {
   tokenBufferReserve = Math.max(5000, Math.min(150000, tokens))
 }
@@ -47,22 +66,12 @@ export function getTokenBufferReserve(): number {
   return tokenBufferReserve
 }
 
-// Model context window 缓存 (modelId → maxInputTokens)
-// 由 proxyServer 在 fetchKiroModels 后填充
-const modelContextWindowCache = new Map<string, number>()
-export function setModelContextWindow(modelId: string, maxInputTokens: number): void {
-  if (modelId && maxInputTokens > 0) {
-    modelContextWindowCache.set(modelId, maxInputTokens)
-  }
-}
-export function getModelContextWindow(modelId: string): number | undefined {
-  return modelContextWindowCache.get(modelId)
-}
-
 // 根据 modelId 和 buffer 计算 effective token limit
+// 仅在 enableTokenBufferReserve=true 时被调用
 // 查不到 model 时 fallback 到 200K context (Claude 默认)
 function getEffectiveTokenLimit(modelId?: string): number {
-  const ctx = (modelId ? modelContextWindowCache.get(modelId) : undefined) || 200000
+  // 复用 getModelContextLength（支持 cache 命中 → 模糊匹配 → 关键词兜底）
+  const ctx = modelId ? getModelContextLength(modelId) : 200000
   return Math.max(8000, ctx - tokenBufferReserve)
 }
 
@@ -956,13 +965,16 @@ export function buildKiroPayload(
   // ====== 第一阶段：按 token 估算成对裁剪旧 history ======
   // 避免 Kiro 后端 CONTENT_LENGTH_EXCEEDS_THRESHOLD（token 维度的拒绝）
   // 注意：byte size 充足但 token 超限是常见情况（长对话+大量小消息）
-  // effectiveLimit 按模型 context window 自动算：ctx - tokenBufferReserve (默认 50K)
-  // 例：sonnet-4.5 (200K) → 150K, sonnet-4.5 with 1M beta → 950K
-  const effectiveTokenLimit = getEffectiveTokenLimit(modelId)
-  const tokenTrimResult = trimHistoryByTokens(payload, effectiveTokenLimit)
-  if (tokenTrimResult.trimmed > 0) {
-    const modelCtx = getModelContextWindow(modelId) || 200000
-    console.log(`[KiroPayload] Trimmed ${tokenTrimResult.trimmed} oldest history messages by token estimate (≈${tokenTrimResult.finalTokens.toLocaleString()} / ${effectiveTokenLimit.toLocaleString()} tokens [model ctx ${modelCtx.toLocaleString()} - buffer ${tokenBufferReserve.toLocaleString()}], ${tokenTrimResult.iterations} iter)`)
+  // effectiveLimit 按模型 context window 自动算：ctx - tokenBufferReserve（开关启用时，默认 20K）
+  // 例：sonnet-4.5 (200K) → 180K, sonnet-4.5 with 1M beta → 980K
+  // 开关关闭时完全跳过，超出 context window 由 Kiro 后端原样返回错误
+  if (enableTokenBufferReserve) {
+    const effectiveTokenLimit = getEffectiveTokenLimit(modelId)
+    const tokenTrimResult = trimHistoryByTokens(payload, effectiveTokenLimit)
+    if (tokenTrimResult.trimmed > 0) {
+      const modelCtx = getModelContextLength(modelId)
+      console.log(`[KiroPayload] Trimmed ${tokenTrimResult.trimmed} oldest history messages by token estimate (≈${tokenTrimResult.finalTokens.toLocaleString()} / ${effectiveTokenLimit.toLocaleString()} tokens [model ctx ${modelCtx.toLocaleString()} - buffer ${tokenBufferReserve.toLocaleString()}], ${tokenTrimResult.iterations} iter)`)
+    }
   }
 
   // ====== 第二阶段：按 byte 截断 tool result 内容 ======
@@ -1209,9 +1221,9 @@ export async function callKiroApiStream(
       }
 
       // 解析 Event Stream
-      // 计算输入字符长度用于估算 input tokens
+      // 传入 modelId + payloadStr 用于精确 token 计算（contextUsage 反推 + tiktoken）
       const inputChars = payloadStr.length
-      await parseEventStream(response.body!, onChunk, onComplete, onError, inputChars, signal)
+      await parseEventStream(response.body!, onChunk, onComplete, onError, inputChars, signal, requestedModelId, payloadStr)
       return
     } catch (error) {
       if (signal?.aborted) {
@@ -1283,20 +1295,10 @@ interface ToolUseState {
   inputBuffer: string
 }
 
-// Token 估算（仅作兜底，Kiro 后端返回真实值时不使用）
-// 英文约 1 字符 = 0.3 token，中文约 1 字符 = 0.6 token
+// Token 估算（被 promptCacheTracker 等模块使用，用于 cache 块大小判定）
+// 优先使用 tiktoken cl100k_base 精确计算（±5%），失败时自动降级到字符系数（±15%）
 export function estimateTokens(text: string): number {
-  let cjkChars = 0
-  let otherChars = 0
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i)
-    if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF) || (code >= 0xF900 && code <= 0xFAFF)) {
-      cjkChars++
-    } else {
-      otherChars++
-    }
-  }
-  return Math.round(cjkChars * 0.6 + otherChars * 0.3)
+  return countTokens(text)
 }
 
 // 解析 AWS Event Stream 二进制格式
@@ -1305,8 +1307,10 @@ async function parseEventStream(
   onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void,
   onComplete: (usage: KiroUsage) => void,
   onError: (error: Error) => void,
-  inputChars: number = 0,  // 输入字符长度，用于估算 input tokens
-  signal?: AbortSignal
+  inputChars: number = 0,  // 输入字符长度（兜底估算用）
+  signal?: AbortSignal,
+  modelId?: string,        // 模型 ID，用于 contextUsagePercentage 反推 inputTokens
+  payloadStr?: string      // 请求 payload JSON 字符串，用于 tiktoken 精确计算
 ): Promise<void> {
   const reader = body.getReader()
   const abort = () => {
@@ -1324,15 +1328,22 @@ async function parseEventStream(
   
   // 累积输出文本长度，用于估算 tokens
   let totalOutputChars = 0
+  // 累积输出文本内容，用于 tiktoken 精确计算 output tokens
+  let collectedOutputText = ''
+  // 是否已拿到 Kiro 真实 tokenUsage（最高优先级，锁定后不再被 contextUsage/tiktoken 覆盖）
+  let hasRealTokenUsage = false
   
   // 流式事件聚合计数（logStreamEvents 开启时，结束后输出摘要而非逐条输出）
   const streamEventCounts: Record<string, number> = {}
   
-  // 估算 input tokens（基于输入字符长度，仅 Kiro 后端不返回 tokenUsage 时使用）
-  // 英文约 1 字符 = 0.3 token，中文约 1 字符 = 0.6 token
-  // payload 是 JSON 以英文为主，使用 0.3 系数
-  if (inputChars > 0) {
-    usage.inputTokens = Math.max(1, Math.round(inputChars * 0.3))
+  // 初始化 input tokens 估算（优先级链路：tokenUsage > contextUsage 反推 > tiktoken > 字符系数）
+  // 这里只是兜底初值，后续真实事件会覆盖
+  if (payloadStr) {
+    // 用 tiktoken cl100k_base 精确计算（±5%）
+    usage.inputTokens = countTokens(payloadStr)
+  } else if (inputChars > 0) {
+    // 字符系数兜底（针对 payload JSON 经验值 0.42）
+    usage.inputTokens = Math.max(1, Math.round(inputChars * 0.42))
   }
   
   // Tool use 状态跟踪 - 用于累积输入片段
@@ -1397,8 +1408,23 @@ async function parseEventStream(
               const content = assistantResp.content
               if (content) {
                 onChunk(content)
-                // 累积输出字符长度
+                // 累积输出字符长度（兜底估算用）
                 totalOutputChars += content.length
+                // 累积输出文本（tiktoken 精确计算用）
+                collectedOutputText += content
+              }
+            }
+
+            // AmazonQ CLI 协议特有：CodeEvent (代码片段流式输出)
+            // 来自 amzn_qdeveloper_streaming_client 的 ChatResponseStream::CodeEvent { content: String }
+            // CodeWhisperer/AmazonQ 端点用 AssistantResponseEvent 包代码，CLI 端点单独用 CodeEvent
+            if (eventType === 'codeEvent' || event.codeEvent) {
+              const codeResp = event.codeEvent || event
+              const content = codeResp.content
+              if (content) {
+                onChunk(content)
+                totalOutputChars += content.length
+                collectedOutputText += content
               }
             }
             
@@ -1516,12 +1542,16 @@ async function parseEventStream(
                 const cacheWrite = tokenUsage.cacheWriteInputTokens || 0
                 const calculatedInput = uncached + cacheRead + cacheWrite
                 
-                if (calculatedInput > 0) usage.inputTokens = calculatedInput
+                if (calculatedInput > 0) {
+                  usage.inputTokens = calculatedInput
+                  hasRealTokenUsage = true  // 真实值，锁定不再被 contextUsage/tiktoken 覆盖
+                }
                 if (tokenUsage.outputTokens) usage.outputTokens = tokenUsage.outputTokens
                 if (tokenUsage.totalTokens) {
                   // 如果有 totalTokens，用它来推算
                   if (usage.inputTokens === 0 && usage.outputTokens > 0) {
                     usage.inputTokens = tokenUsage.totalTokens - usage.outputTokens
+                    hasRealTokenUsage = true
                   }
                 }
                 
@@ -1547,7 +1577,10 @@ async function parseEventStream(
               }
               
               // 直接在 metadata 中的 tokens
-              if (metadata.inputTokens) usage.inputTokens = metadata.inputTokens
+              if (metadata.inputTokens) {
+                usage.inputTokens = metadata.inputTokens
+                hasRealTokenUsage = true
+              }
               if (metadata.outputTokens) usage.outputTokens = metadata.outputTokens
             }
             
@@ -1559,7 +1592,10 @@ async function parseEventStream(
             // 处理 usageEvent
             if (eventType === 'usageEvent' || eventType === 'usage' || event.usageEvent || event.usage) {
               const usageData = event.usageEvent || event.usage || event
-              if (usageData.inputTokens) usage.inputTokens = usageData.inputTokens
+              if (usageData.inputTokens) {
+                usage.inputTokens = usageData.inputTokens
+                hasRealTokenUsage = true
+              }
               if (usageData.outputTokens) usage.outputTokens = usageData.outputTokens
             }
             
@@ -1591,12 +1627,25 @@ async function parseEventStream(
               proxyLogger.debug('Kiro', 'supplementaryWebLinksEvent', JSON.stringify(webLinksEvent).slice(0, 300))
             }
             
-            // 处理 contextUsageEvent - 上下文使用百分比
+            // 处理 contextUsageEvent - 上下文使用百分比（反推真实 inputTokens）
             if (eventType === 'contextUsageEvent' || event.contextUsageEvent) {
               const contextEvent = event.contextUsageEvent || event
               if (contextEvent.contextUsagePercentage !== undefined) {
                 const percentage = contextEvent.contextUsagePercentage
-                proxyLogger.info('Kiro', 'contextUsageEvent - Context usage: ' + percentage.toFixed(2) + '%')
+                // 若已拿到真实 tokenUsage，仅记录百分比，不覆盖 inputTokens
+                if (hasRealTokenUsage) {
+                  proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}% (real tokenUsage already received)`)
+                } else {
+                  // 反推真实 inputTokens：modelContext × percentage / 100
+                  const contextLen = getModelContextLength(modelId)
+                  const reverseInput = Math.round(contextLen * percentage / 100)
+                  if (reverseInput > 0) {
+                    usage.inputTokens = reverseInput
+                    proxyLogger.info('Kiro', `contextUsageEvent ${percentage.toFixed(2)}% → inputTokens=${reverseInput} (modelContext=${contextLen}, model=${modelId || 'unknown'})`)
+                  } else {
+                    proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}%`)
+                  }
+                }
                 // 如果上下文使用率超过 80%，发送警告
                 if (percentage > 80) {
                   console.warn('[Kiro] Warning: Context usage is high:', percentage.toFixed(2) + '%')
@@ -1739,11 +1788,17 @@ async function parseEventStream(
       totalOutputChars += currentToolUse.name.length + currentToolUse.inputBuffer.length
     }
     
-    // 如果 API 没有返回 token 信息，基于输出字符长度估算
-    // 输出是自然语言，中英混合平均约 0.4 token/字符
+    // 如果 API 没有返回 token 信息，优先用 tiktoken 精确计算，兜底字符系数
     if (usage.outputTokens === 0 && totalOutputChars > 0) {
-      usage.outputTokens = Math.max(1, Math.round(totalOutputChars * 0.4))
-      proxyLogger.info('Kiro', `Estimated output tokens: ${totalOutputChars} chars -> ${usage.outputTokens} tokens`)
+      if (collectedOutputText) {
+        // tiktoken cl100k_base 精确计算（±5%）
+        usage.outputTokens = Math.max(1, countTokens(collectedOutputText))
+        proxyLogger.info('Kiro', `Estimated output tokens (tiktoken): ${totalOutputChars} chars -> ${usage.outputTokens} tokens`)
+      } else {
+        // 字符系数兜底（自然语言中英混合约 0.4 token/字符）
+        usage.outputTokens = Math.max(1, Math.round(totalOutputChars * 0.4))
+        proxyLogger.info('Kiro', `Estimated output tokens (fallback): ${totalOutputChars} chars -> ${usage.outputTokens} tokens`)
+      }
     }
     
     // 流式事件聚合摘要
