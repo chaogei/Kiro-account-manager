@@ -16,7 +16,7 @@ import {
   type KProxyConfig,
   type DeviceIdMapping
 } from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, resolveAccountProfileArn } from './proxy/kiroApi'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
@@ -1095,6 +1095,68 @@ function normalizeResetDate(value: number | string | undefined): string | undefi
   return value
 }
 
+function isEnterpriseIdp(idp?: string): boolean {
+  return idp === 'Enterprise' || idp === 'IAM_SSO' || idp === 'AWSIdC'
+}
+
+function normalizeUsageLimitsResponse(result: UsageLimitsResponse): UnifiedUsageResponse {
+  return {
+    usageBreakdownList: result.usageBreakdownList?.map(b => ({
+      resourceType: b.resourceType || b.type,
+      displayName: b.displayName,
+      displayNamePlural: b.displayNamePlural,
+      currentUsage: b.currentUsage,
+      currentUsageWithPrecision: b.currentUsageWithPrecision,
+      usageLimit: b.usageLimit,
+      usageLimitWithPrecision: b.usageLimitWithPrecision,
+      currency: b.currency,
+      unit: b.unit,
+      overageRate: b.overageRate,
+      overageCap: b.overageCap,
+      type: b.type,
+      // REST API 直接返回 freeTrialInfo，CBOR API 返回 freeTrialUsage
+      freeTrialInfo: b.freeTrialInfo ? {
+        freeTrialStatus: b.freeTrialInfo.freeTrialStatus,
+        usageLimit: b.freeTrialInfo.usageLimit,
+        usageLimitWithPrecision: b.freeTrialInfo.usageLimitWithPrecision,
+        currentUsage: b.freeTrialInfo.currentUsage,
+        currentUsageWithPrecision: b.freeTrialInfo.currentUsageWithPrecision,
+        // REST API 返回数字时间戳，需要转换为 ISO 字符串
+        freeTrialExpiry: typeof b.freeTrialInfo.freeTrialExpiry === 'number'
+          ? new Date(b.freeTrialInfo.freeTrialExpiry * 1000).toISOString()
+          : b.freeTrialInfo.freeTrialExpiry
+      } : (b.freeTrialUsage ? {
+        freeTrialStatus: b.freeTrialUsage.freeTrialStatus,
+        usageLimit: b.freeTrialUsage.usageLimit,
+        usageLimitWithPrecision: b.freeTrialUsage.usageLimitWithPrecision,
+        currentUsage: b.freeTrialUsage.currentUsage,
+        currentUsageWithPrecision: b.freeTrialUsage.currentUsageWithPrecision,
+        freeTrialExpiry: b.freeTrialUsage.freeTrialExpiry
+      } : undefined),
+      // 转换 bonuses 中的时间戳为 ISO 字符串
+      bonuses: b.bonuses?.map(bonus => ({
+        ...bonus,
+        expiresAt: typeof bonus.expiresAt === 'number'
+          ? new Date(bonus.expiresAt * 1000).toISOString()
+          : bonus.expiresAt
+      }))
+    })),
+    // REST API 返回的 nextDateReset 是 Unix 时间戳（秒），需要转换为 ISO 字符串
+    nextDateReset: normalizeResetDate(result.nextDateReset),
+    subscriptionInfo: result.subscriptionInfo,
+    overageConfiguration: result.overageConfiguration,
+    userInfo: result.userInfo
+  }
+}
+
+function shouldFallbackCborUsageToRest(errorMessage: string): boolean {
+  return errorMessage.includes('401')
+    || errorMessage.includes('403')
+    || errorMessage.includes('400')
+    || errorMessage.includes('BadRequestException')
+    || errorMessage.toLowerCase().includes('invalid parameters')
+}
+
 async function fetchRestApi(
   baseUrl: string,
   path: string,
@@ -1227,57 +1289,21 @@ async function getUsageAndLimits(
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
   email?: string              // 用于日志标识
 ): Promise<UnifiedUsageResponse> {
-  if (currentUsageApiType === 'rest') {
+  const resolvedProfileArn = profileArn || (isEnterpriseIdp(idp)
+    ? await resolveAccountProfileArn({
+        id: email || 'usage-request',
+        email,
+        accessToken,
+        region: ssoRegion || 'us-east-1',
+        provider: idp,
+        machineId: accountMachineId
+      } as ProxyAccount)
+    : undefined)
+
+  if (currentUsageApiType === 'rest' || isEnterpriseIdp(idp)) {
     // 使用 REST API (GetUsageLimits)
-    const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email)
-    // REST API 返回的字段名和 CBOR API 相同，直接返回
-    return {
-      usageBreakdownList: result.usageBreakdownList?.map(b => ({
-        resourceType: b.resourceType || b.type,
-        displayName: b.displayName,
-        displayNamePlural: b.displayNamePlural,
-        currentUsage: b.currentUsage,
-        currentUsageWithPrecision: b.currentUsageWithPrecision,
-        usageLimit: b.usageLimit,
-        usageLimitWithPrecision: b.usageLimitWithPrecision,
-        currency: b.currency,
-        unit: b.unit,
-        overageRate: b.overageRate,
-        overageCap: b.overageCap,
-        type: b.type,
-        // REST API 直接返回 freeTrialInfo，CBOR API 返回 freeTrialUsage
-        freeTrialInfo: b.freeTrialInfo ? {
-          freeTrialStatus: b.freeTrialInfo.freeTrialStatus,
-          usageLimit: b.freeTrialInfo.usageLimit,
-          usageLimitWithPrecision: b.freeTrialInfo.usageLimitWithPrecision,
-          currentUsage: b.freeTrialInfo.currentUsage,
-          currentUsageWithPrecision: b.freeTrialInfo.currentUsageWithPrecision,
-          // REST API 返回数字时间戳，需要转换为 ISO 字符串
-          freeTrialExpiry: typeof b.freeTrialInfo.freeTrialExpiry === 'number' 
-            ? new Date(b.freeTrialInfo.freeTrialExpiry * 1000).toISOString() 
-            : b.freeTrialInfo.freeTrialExpiry
-        } : (b.freeTrialUsage ? {
-          freeTrialStatus: b.freeTrialUsage.freeTrialStatus,
-          usageLimit: b.freeTrialUsage.usageLimit,
-          usageLimitWithPrecision: b.freeTrialUsage.usageLimitWithPrecision,
-          currentUsage: b.freeTrialUsage.currentUsage,
-          currentUsageWithPrecision: b.freeTrialUsage.currentUsageWithPrecision,
-          freeTrialExpiry: b.freeTrialUsage.freeTrialExpiry
-        } : undefined),
-        // 转换 bonuses 中的时间戳为 ISO 字符串
-        bonuses: b.bonuses?.map(bonus => ({
-          ...bonus,
-          expiresAt: typeof bonus.expiresAt === 'number' 
-            ? new Date(bonus.expiresAt * 1000).toISOString() 
-            : bonus.expiresAt
-        }))
-      })),
-      // REST API 返回的 nextDateReset 是 Unix 时间戳（秒），需要转换为 ISO 字符串
-      nextDateReset: normalizeResetDate(result.nextDateReset),
-      subscriptionInfo: result.subscriptionInfo,
-      overageConfiguration: result.overageConfiguration,
-      userInfo: result.userInfo
-    }
+    const result = await getUsageLimitsRest(accessToken, resolvedProfileArn, accountMachineId, ssoRegion, email)
+    return normalizeUsageLimitsResponse(result)
   } else {
     // 使用 CBOR API (GetUserUsageAndLimits)
     // CBOR API (app.kiro.dev) 是网页端门户，仅支持 BuilderId 认证
@@ -1293,53 +1319,11 @@ async function getUsageAndLimits(
       )
     } catch (cborError) {
       const errorMsg = cborError instanceof Error ? cborError.message : ''
-      // CBOR 401/403 时自动 fallback 到 REST API
-      if (errorMsg.includes('401') || errorMsg.includes('403')) {
+      // CBOR 失败时自动 fallback 到 REST API（Enterprise/IdC 常见 400 invalid parameters）
+      if (shouldFallbackCborUsageToRest(errorMsg)) {
         console.log(`[API] CBOR API failed (${errorMsg}), falling back to REST API...`)
-        const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email)
-        return {
-          usageBreakdownList: result.usageBreakdownList?.map(b => ({
-            resourceType: b.resourceType || b.type,
-            displayName: b.displayName,
-            displayNamePlural: b.displayNamePlural,
-            currentUsage: b.currentUsage,
-            currentUsageWithPrecision: b.currentUsageWithPrecision,
-            usageLimit: b.usageLimit,
-            usageLimitWithPrecision: b.usageLimitWithPrecision,
-            currency: b.currency,
-            unit: b.unit,
-            overageRate: b.overageRate,
-            overageCap: b.overageCap,
-            type: b.type,
-            freeTrialInfo: b.freeTrialInfo ? {
-              freeTrialStatus: b.freeTrialInfo.freeTrialStatus,
-              usageLimit: b.freeTrialInfo.usageLimit,
-              usageLimitWithPrecision: b.freeTrialInfo.usageLimitWithPrecision,
-              currentUsage: b.freeTrialInfo.currentUsage,
-              currentUsageWithPrecision: b.freeTrialInfo.currentUsageWithPrecision,
-              freeTrialExpiry: typeof b.freeTrialInfo.freeTrialExpiry === 'number' 
-                ? new Date(b.freeTrialInfo.freeTrialExpiry * 1000).toISOString() 
-                : b.freeTrialInfo.freeTrialExpiry
-            } : (b.freeTrialUsage ? {
-              freeTrialStatus: b.freeTrialUsage.freeTrialStatus,
-              usageLimit: b.freeTrialUsage.usageLimit,
-              usageLimitWithPrecision: b.freeTrialUsage.usageLimitWithPrecision,
-              currentUsage: b.freeTrialUsage.currentUsage,
-              currentUsageWithPrecision: b.freeTrialUsage.currentUsageWithPrecision,
-              freeTrialExpiry: b.freeTrialUsage.freeTrialExpiry
-            } : undefined),
-            bonuses: b.bonuses?.map(bonus => ({
-              ...bonus,
-              expiresAt: typeof bonus.expiresAt === 'number' 
-                ? new Date(bonus.expiresAt * 1000).toISOString() 
-                : bonus.expiresAt
-            }))
-          })),
-          nextDateReset: normalizeResetDate(result.nextDateReset as unknown as number | string),
-          subscriptionInfo: result.subscriptionInfo,
-          overageConfiguration: result.overageConfiguration,
-          userInfo: result.userInfo
-        }
+        const result = await getUsageLimitsRest(accessToken, resolvedProfileArn, accountMachineId, ssoRegion, email)
+        return normalizeUsageLimitsResponse(result)
       }
       throw cborError
     }
@@ -3659,7 +3643,14 @@ app.whenReady().then(async () => {
         userInfo?: { email?: string; userId?: string }
       }
       
-      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, undefined, undefined, region) as UsageResponse
+      const resolvedProfileArn = await resolveAccountProfileArn({
+        id: 'verify-account',
+        accessToken: refreshResult.accessToken,
+        region,
+        provider: idp,
+        authMethod
+      } as ProxyAccount)
+      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, resolvedProfileArn, undefined, region) as UsageResponse
       
       // 解析用户信息
       const email = usageResult.userInfo?.email || ''
@@ -3736,6 +3727,7 @@ app.whenReady().then(async () => {
           userId,
           accessToken: refreshResult.accessToken,
           refreshToken: refreshResult.refreshToken || refreshToken,
+          profileArn: resolvedProfileArn,
           expiresIn: refreshResult.expiresIn,
           subscriptionType,
           subscriptionTitle,
@@ -3826,6 +3818,7 @@ app.whenReady().then(async () => {
         region?: string
         authMethod?: string
         provider?: string
+        profileArn?: string
       }
       
       try {
@@ -3833,6 +3826,19 @@ app.whenReady().then(async () => {
         tokenData = JSON.parse(tokenContent)
       } catch {
         return { success: false, error: '找不到 kiro-auth-token.json 文件，请先在 Kiro IDE 中登录' }
+      }
+
+      if (!tokenData.profileArn) {
+        try {
+          const profilePath = path.join(os.homedir(), 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent', 'profile.json')
+          const profileData = JSON.parse(await readFile(profilePath, 'utf-8'))
+          if (profileData?.arn) {
+            tokenData.profileArn = profileData.arn
+            console.log('[Kiro Credentials] Loaded profileArn from Kiro profile storage')
+          }
+        } catch {
+          // profile.json is optional; ListAvailableProfiles will be used when needed
+        }
       }
       
       if (!tokenData.refreshToken) {
@@ -3905,7 +3911,8 @@ app.whenReady().then(async () => {
           clientSecret: clientData?.clientSecret || '',
           region: tokenData.region || 'us-east-1',
           authMethod: tokenData.authMethod || 'IdC',
-          provider: tokenData.provider || 'BuilderId'
+          provider: tokenData.provider || 'BuilderId',
+          profileArn: tokenData.profileArn
         }
       }
     } catch (error) {
@@ -3972,7 +3979,9 @@ app.whenReady().then(async () => {
       const SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
       const BUILDER_ID_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
       const resolvedProfileArn = profileArn
-        || (authMethod === 'social' || provider === 'Google' || provider === 'Github' ? SOCIAL_PROFILE_ARN : BUILDER_ID_PROFILE_ARN)
+        || (authMethod === 'social' || provider === 'Google' || provider === 'Github' ? SOCIAL_PROFILE_ARN : undefined)
+        || (provider === 'Enterprise' ? await resolveAccountProfileArn({ id: 'switch-account', accessToken, region, provider, authMethod } as ProxyAccount) : undefined)
+        || (provider === 'BuilderId' ? BUILDER_ID_PROFILE_ARN : undefined)
 
       // 写入 token 文件（格式与官方 Kiro IDE 完全一致）
       const tokenPath = path.join(ssoCache, 'kiro-auth-token.json')
@@ -3994,9 +4003,11 @@ app.whenReady().then(async () => {
             clientIdHash,
             authMethod,
             provider,
-            region,
-            profileArn: resolvedProfileArn
+            region
           }
+      if (resolvedProfileArn) {
+        tokenData.profileArn = resolvedProfileArn
+      }
       await writeFile(tokenPath, JSON.stringify(tokenData, null, 2))
       console.log('[Switch Account] Token saved to:', tokenPath)
       
@@ -4085,7 +4096,10 @@ app.whenReady().then(async () => {
       // 根据 provider 推导 profileArn
       const SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
       const BUILDER_ID_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
-      const resolvedProfileArn = profileArn || (isSocial ? SOCIAL_PROFILE_ARN : BUILDER_ID_PROFILE_ARN)
+      const resolvedProfileArn = profileArn
+        || (isSocial ? SOCIAL_PROFILE_ARN : undefined)
+        || (provider === 'Enterprise' ? await resolveAccountProfileArn({ id: 'switch-cli', accessToken, region, provider } as ProxyAccount) : undefined)
+        || (provider === 'Enterprise' ? undefined : BUILDER_ID_PROFILE_ARN)
 
       // 构建 token JSON（snake_case 字段名，与 kiro-cli Rust 结构一致）
       const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString()
@@ -4872,7 +4886,8 @@ app.whenReady().then(async () => {
         clientId: account.credentials?.clientId,
         clientSecret: account.credentials?.clientSecret,
         region: account.credentials?.region || 'us-east-1',
-        authMethod: account.credentials?.authMethod
+        authMethod: account.credentials?.authMethod,
+        provider: account.credentials?.provider || account.idp
       }
 
       const models = await fetchKiroModels(proxyAccount)
