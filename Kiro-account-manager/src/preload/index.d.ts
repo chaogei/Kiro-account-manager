@@ -275,6 +275,7 @@ interface KiroApi {
       region: string
       authMethod: string  // 'IdC' 或 'social'
       provider: string    // 'BuilderId', 'Github', 'Google'
+      profileArn?: string
     }
     error?: string
   }>

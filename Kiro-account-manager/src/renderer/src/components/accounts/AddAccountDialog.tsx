@@ -212,7 +212,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           email,
           userId,
           nickname: email ? email.split('@')[0] : undefined,
-          idp: providerName as 'BuilderId' | 'Google' | 'Github',
+          idp: providerName as 'BuilderId' | 'Enterprise' | 'Google' | 'Github',
           credentials: {
             accessToken: result.data.accessToken,
             csrfToken: '',
@@ -223,7 +223,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             startUrl: tokenData.startUrl,
             expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
             authMethod: tokenData.authMethod as 'IdC' | 'social',
-            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'Github' | 'Google'
           },
           subscription: {
             type: result.data.subscriptionType as SubscriptionType,

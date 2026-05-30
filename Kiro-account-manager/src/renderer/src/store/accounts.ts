@@ -134,7 +134,8 @@ async function syncLocalSsoAccountAsync(
       email: verifyResult.data.email,
       userId: verifyResult.data.userId,
       nickname: verifyResult.data.email ? verifyResult.data.email.split('@')[0] : undefined,
-      idp: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Google' | 'Github',
+      idp: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'Google' | 'Github',
+      profileArn: importResult.data.profileArn,
       credentials: {
         accessToken: verifyResult.data.accessToken,
         csrfToken: '',
@@ -144,7 +145,7 @@ async function syncLocalSsoAccountAsync(
         region: importResult.data.region || 'us-east-1',
         expiresAt: verifyResult.data.expiresIn ? now + verifyResult.data.expiresIn * 1000 : now + 3600 * 1000,
         authMethod: importResult.data.authMethod as 'IdC' | 'social',
-        provider: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+        provider: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'Github' | 'Google'
       },
       subscription: {
         type: verifyResult.data.subscriptionType as SubscriptionType,
