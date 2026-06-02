@@ -313,6 +313,20 @@ export interface OutlookAccount {
   refreshToken: string
 }
 
+/** 按 ---- 拆分；多出的连字符(N-4)归还前一字段（refreshToken 等 base64url 可能以 '-' 结尾） */
+function splitByDashes(line: string): string[] {
+  const parts: string[] = []
+  const re = /-{4,}/g
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(line)) !== null) {
+    parts.push(line.slice(last, m.index) + '-'.repeat(m[0].length - 4))
+    last = m.index + m[0].length
+  }
+  parts.push(line.slice(last))
+  return parts
+}
+
 export function parseOutlookLines(data: string): OutlookAccount[] {
   const accounts: OutlookAccount[] = []
   data = data.trim()
@@ -322,7 +336,7 @@ export function parseOutlookLines(data: string): OutlookAccount[] {
   const parseEntry = (entry: string): void => {
     entry = entry.trim()
     if (!entry) return
-    const parts = entry.split('----')
+    const parts = splitByDashes(entry)
     if (parts.length === 4) {
       accounts.push({
         email: parts[0].trim(),

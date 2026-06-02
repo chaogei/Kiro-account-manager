@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../ui'
+import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import type { SubscriptionType } from '@/types/account'
 import { X, Loader2, Download, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
+import { splitCredentialLine } from '@/lib/utils'
 
 interface AddAccountDialogProps {
   isOpen: boolean
@@ -60,7 +61,7 @@ type ImportMode = 'oidc' | 'sso' | 'login'
 type LoginType = 'builderid' | 'google' | 'github' | 'iamsso'
 
 export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): React.ReactNode {
-  const { addAccount, accounts, batchImportConcurrency, loginPrivateMode } = useAccountsStore()
+  const { addAccount, accounts, batchImportConcurrency, loginPrivateMode, groups, activeGroupTab } = useAccountsStore()
 
   // 检查账户是否已存在（同userId 或 同邮箱+同provider 才算重复）
   const isAccountExists = (email: string, userId: string, provider?: string): boolean => {
@@ -76,6 +77,9 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
 
   // 导入模式
   const [importMode, setImportMode] = useState<ImportMode>('login')
+
+  // 添加到的目标分组（默认=当前打开的分组，可在弹窗内改）；undefined=未分组（默认分组）
+  const [selectedGroupId, setSelectedGroupId] = useState<string | undefined>(undefined)
 
   // OIDC 凭证输入
   const [refreshToken, setRefreshToken] = useState('')
@@ -134,6 +138,13 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
       }
     }
   }, [])
+
+  // 打开弹窗时默认选中"当前打开的分组"（activeGroupTab 为真实分组时），否则未分组
+  useEffect(() => {
+    if (!isOpen) return
+    const isRealGroup = activeGroupTab !== 'all' && activeGroupTab !== 'ungrouped' && groups.has(activeGroupTab)
+    setSelectedGroupId(isRealGroup ? activeGroupTab : undefined)
+  }, [isOpen, activeGroupTab, groups])
 
   // 监听 Social Auth 回调
   useEffect(() => {
@@ -213,6 +224,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           userId,
           nickname: email ? email.split('@')[0] : undefined,
           idp: providerName as 'BuilderId' | 'Google' | 'Github',
+          groupId: selectedGroupId,
           credentials: {
             accessToken: result.data.accessToken,
             csrfToken: '',
@@ -251,7 +263,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             nextResetDate: result.data.usage.nextResetDate,
             resourceDetail: result.data.usage.resourceDetail
           },
-          groupId: undefined,
           tags: [],
           status: 'active',
           lastUsedAt: now
@@ -546,6 +557,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             userId: userId || '',
             nickname: email ? email.split('@')[0] : undefined,
             idp: 'BuilderId',
+            groupId: selectedGroupId,
             credentials: {
               accessToken: result.data.accessToken,
               csrfToken: '',
@@ -579,7 +591,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               nextResetDate: result.data.usage?.nextResetDate,
               resourceDetail: result.data.usage?.resourceDetail
             },
-            groupId: undefined,
             tags: [],
             status: 'active',
             lastUsedAt: now
@@ -671,14 +682,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
       }
 
       credentials = lines.map(line => {
-        let parts: string[]
-        if (line.includes('----')) {
-          parts = line.split('----')
-        } else if (line.includes('\t')) {
-          parts = line.split('\t')
-        } else {
-          parts = line.split(/\s{2,}/)
-        }
+        const parts = splitCredentialLine(line)
         const rawPwd = parts[1]?.trim()
         const clientId = parts[3]?.trim() || undefined
         const clientSecret = parts[4]?.trim() || undefined
@@ -766,6 +770,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             userId,
             nickname: email ? email.split('@')[0] : undefined,
             idp,
+            groupId: selectedGroupId,
             credentials: {
               accessToken: result.data.accessToken,
               csrfToken: '',
@@ -802,7 +807,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               nextResetDate: result.data.usage.nextResetDate,
               resourceDetail: result.data.usage.resourceDetail
             },
-            groupId: undefined,
             tags: [],
             status: 'active',
             lastUsedAt: now
@@ -849,7 +853,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           if (isKamiFormat) {
             // 卡密格式：还原为卡密文本
             const kamiLines = failedCredentials.map(c => 
-              [(c as Record<string, string>)._email || '', c.password || '', c.refreshToken, c.clientId || '', c.clientSecret || ''].join('----')
+              [(c as Record<string, string>)._email || '', c.password || '', c.refreshToken, c.clientId || '', c.clientSecret || '', c.provider || ''].join('----')
             )
             setOidcBatchData(kamiLines.join('\n'))
           } else {
@@ -911,6 +915,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           userId,
           nickname: email ? email.split('@')[0] : undefined,
           idp: providerName as 'BuilderId' | 'Github' | 'Google',
+          groupId: selectedGroupId,
           credentials: {
             accessToken: result.data.accessToken,
             csrfToken: '',
@@ -947,7 +952,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             nextResetDate: result.data.usage.nextResetDate,
             resourceDetail: result.data.usage.resourceDetail
           },
-          groupId: undefined,
           tags: [],
           status: 'active',
           lastUsedAt: now
@@ -1005,6 +1009,21 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
         </CardHeader>
 
         <CardContent className="space-y-6 pt-6">
+          {/* 添加到分组（默认=当前打开的分组，可改）；无分组时不显示 */}
+          {groups.size > 0 && (
+            <div className="flex items-center gap-3">
+              <Label className="text-sm whitespace-nowrap">{isEn ? 'Add to group' : '添加到分组'}</Label>
+              <Select
+                className="flex-1"
+                value={selectedGroupId ?? '__default__'}
+                onChange={(v) => setSelectedGroupId(v === '__default__' ? undefined : v)}
+                options={[
+                  { value: '__default__', label: isEn ? 'Default (Ungrouped)' : '默认（未分组）' },
+                  ...Array.from(groups.values()).sort((a, b) => a.order - b.order).map(g => ({ value: g.id, label: g.name }))
+                ]}
+              />
+            </div>
+          )}
           {/* 导入模式切换 */}
           <div className="grid grid-cols-3 gap-1 p-1 bg-muted/50 rounded-xl border">
             <button

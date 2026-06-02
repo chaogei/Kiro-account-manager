@@ -272,6 +272,29 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ## 📋 Changelog
 
 
+### v1.7.2 (2026-6-2) — Batch Subscription Link Enhancements + Card-Key Parsing Fix + Group Assignment on Add/Import
+
+> This release focuses on bulk import & quick-pick batched opening in the Subscription "Get Links" view, a boundary-character fix in card-key/credential parsing (resolving import-verification 401s), and assigning accounts to a chosen group when adding / batch-adding / importing.
+
+#### 🔗 Batch Subscription · Get Links
+
+- **New**: Bulk link import — paste multi-line text in a dialog; URLs are auto-extracted per line (plain URL, or "email<sep>URL" with sep = space / comma / tab / | / ----), de-duplicated by URL, and added as "success" entries so they can be opened (single / multi-select), copied, and exported just like existing links
+- **New**: Quick-pick "Top N" — one-click selects the top N available links from the list (default 10, count remembered across pages) for batched opening
+- **New**: Quick-pick "Next" — continues from the last cursor to select the next N, looping at the end; combined with "Open Selected" it enables batched opening without launching too many browser windows at once
+
+#### 🎫 Card-Key / Credential Parsing (Boundary-Char Fix)
+
+- **Fix**: 🔥 **Card-key import verification 401 (Bad credentials)** — RefreshToken / ClientSecret are base64url(JWT); when a field value ends with `-`, it abuts the `----` separator forming 5+ consecutive `-`. The old `split('----')` consumed only the first 4, dropping ClientSecret's trailing `-` (corrupting the JWT) and turning provider into `-BuilderId` → authMethod mis-detected as social → refresh hit the wrong endpoint and returned 401
+- **New**: Unified parser `splitCredentialLine` — matches separators with `/-{4,}/` and returns the extra (N-4) `-` to the previous field, keeping the JWT intact and provider correct; applied to OIDC batch import, TXT file card-key import, and Outlook mailbox parsing
+- **Fix**: TXT file card-key import previously hardcoded `idp=BuilderId` and ignored the 6th field — now reads the login method and infers from ClientId / Secret, consistent with the dialog batch-import logic
+
+#### 🗂️ Add / Batch / Import · Group Assignment
+
+- **New**: The Add Account dialog gains an "Add to group" dropdown at the top — covering login / OIDC single / OIDC batch / SSO; on open it defaults to the "currently opened group", and can be changed to any group or "Default (Ungrouped)"
+- **New**: File import (CSV / TXT / card-key) goes into the "currently opened group", with the group name shown in the completion toast; JSON full-backup import preserves the original group structure
+- **Fix**: Adding an account previously hardcoded `groupId: undefined`, sending new accounts to "Ungrouped" forever — now they are categorized by the selected group
+
+
 ### v1.7.1 (2026-6-1) — Proton OTP Stability / Speed + Social Login Card-Key Fix
 
 > This release focuses on Proton-based registration OTP auto-retrieval (accuracy + speed + log visibility), the Proton login-state & proxy experience, and card-key import/export fixes for GitHub/Google social-login accounts.

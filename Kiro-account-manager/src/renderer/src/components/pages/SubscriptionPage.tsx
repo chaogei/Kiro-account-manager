@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useAccountsStore } from '@/store/accounts'
 import { Button, Card, CardContent } from '../ui'
@@ -18,7 +19,10 @@ import {
   Zap,
   ShieldCheck,
   AlertTriangle,
-  Ban
+  Ban,
+  Upload,
+  ListChecks,
+  X
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -108,6 +112,26 @@ let _selectedPlanType = ''
 let _selectedLinkIds: Set<string> = new Set()
 let _activeTab: SubTab = 'overage'
 let _overageItems: OverageItem[] = []
+let _quickPickCount = 10
+
+/**
+ * 解析批量导入的链接文本：每行一条，支持纯 URL 或「邮箱<分隔符>URL」
+ * 分隔符兼容空格 / 逗号 / Tab / 竖线 / ----，URL 自动从行内提取
+ */
+function parseImportedLinks(text: string): Array<{ email: string; url: string }> {
+  const out: Array<{ email: string; url: string }> = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    const m = line.match(/https?:\/\/[^\s,|]+/i)
+    if (!m || m.index === undefined) continue
+    const url = m[0].replace(/[)\]}>.,;'"]+$/, '')
+    const prefix = line.slice(0, m.index).trim()
+    const emailMatch = prefix.match(/[^\s,|<>"']+@[^\s,|<>"']+\.[^\s,|<>"']+/)
+    out.push({ email: emailMatch ? emailMatch[0] : '', url })
+  }
+  return out
+}
 
 export function SubscriptionPage() {
   const { accounts, selectedIds, updateAccount } = useAccountsStore()
@@ -120,6 +144,12 @@ export function SubscriptionPage() {
   const [links, setLinksState] = useState<SubscriptionLink[]>(_links)
   const [isFetching, setIsFetching] = useState(false)
   const [selectedLinkIds, setSelectedLinkIdsState] = useState<Set<string>>(_selectedLinkIds)
+  // 批量导入链接对话框
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  // 快选：从顶部按设定数量分批选择可用链接（默认 10，跨页面记忆）
+  const [quickPickCount, setQuickPickCountState] = useState(_quickPickCount)
+  const [quickPickCursor, setQuickPickCursor] = useState(0)
+  const setQuickPickCount = (n: number) => { _quickPickCount = n; setQuickPickCountState(n) }
   
   // 计划选择相关
   const [availablePlans, setAvailablePlansState] = useState<SubscriptionPlan[]>(_availablePlans)
@@ -360,6 +390,52 @@ export function SubscriptionPage() {
       }
       return next
     })
+  }
+
+  // 快选：从顶部开始选中前 N 个可用（success）链接，便于分批打开
+  const quickPickTop = () => {
+    const successList = links.filter(l => l.status === 'success' && l.url)
+    const n = Math.max(1, quickPickCount)
+    const picked = successList.slice(0, n)
+    setSelectedLinkIds(new Set(picked.map(l => l.accountId)))
+    setQuickPickCursor(picked.length)
+  }
+
+  // 快选下一批：从上次游标继续选 N 个可用链接，到末尾后循环回到开头
+  const quickPickNext = () => {
+    const successList = links.filter(l => l.status === 'success' && l.url)
+    if (successList.length === 0) return
+    const n = Math.max(1, quickPickCount)
+    let start = quickPickCursor
+    if (start >= successList.length) start = 0
+    const picked = successList.slice(start, start + n)
+    setSelectedLinkIds(new Set(picked.map(l => l.accountId)))
+    setQuickPickCursor(start + picked.length)
+  }
+
+  // 批量导入外部链接：解析后以 success 状态追加进列表（按 url 去重），即可与现有链接一样多选/打开/导出
+  const handleImportLinks = (text: string): number => {
+    const parsed = parseImportedLinks(text)
+    if (parsed.length === 0) return 0
+    const existingUrls = new Set(links.map(l => l.url).filter(Boolean) as string[])
+    const now = Date.now()
+    const added: SubscriptionLink[] = []
+    let seq = links.length
+    for (const { email, url } of parsed) {
+      if (existingUrls.has(url)) continue
+      existingUrls.add(url)
+      seq++
+      added.push({
+        accountId: `import-${crypto.randomUUID()}`,
+        email: email || (isEn ? `(Imported #${seq})` : `(导入 #${seq})`),
+        status: 'success',
+        url,
+        generatedAt: now,
+        validated: false
+      })
+    }
+    if (added.length > 0) setLinks(prev => [...prev, ...added])
+    return added.length
   }
 
   // 批量删除选中的链接（从结果列表中移除，不会调用任何 API）
@@ -1242,6 +1318,18 @@ export function SubscriptionPage() {
                 {isEn ? 'Clear' : '清空'}
               </Button>
 
+              {/* 批量导入外部链接 */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowImportDialog(true)}
+                disabled={isFetching}
+                title={isEn ? 'Import links from text (one per line)' : '从文本批量导入链接（每行一个）'}
+              >
+                <Upload className="h-4 w-4 mr-1" />
+                {isEn ? 'Import' : '导入链接'}
+              </Button>
+
               {/* 检测链接有效性 */}
               <Button
                 variant="outline"
@@ -1291,6 +1379,40 @@ export function SubscriptionPage() {
                     <Square className="h-4 w-4 mr-1" />
                     {isEn ? 'Deselect' : '取消多选'}
                   </Button>
+
+                  {/* 快选：从顶部按数量分批选择可用链接 */}
+                  <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-dashed">
+                    <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-[10px] text-muted-foreground">{isEn ? 'Quick pick' : '快选'}</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={quickPickCount}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10)
+                        if (v > 0) setQuickPickCount(v)
+                      }}
+                      disabled={isFetching}
+                      className="h-6 w-12 px-1 rounded border border-border bg-background text-[11px] text-center"
+                      title={isEn ? 'Number of links to pick' : '快选数量'}
+                    />
+                    <button
+                      onClick={quickPickTop}
+                      disabled={isFetching || successCount === 0}
+                      className="text-[10px] px-1.5 py-0.5 rounded hover:bg-primary/15 text-primary disabled:opacity-40"
+                      title={isEn ? `Select top ${quickPickCount} available links` : `从顶部选中前 ${quickPickCount} 个可用链接`}
+                    >
+                      {isEn ? 'Top' : '前N个'}
+                    </button>
+                    <button
+                      onClick={quickPickNext}
+                      disabled={isFetching || successCount === 0}
+                      className="text-[10px] px-1.5 py-0.5 rounded hover:bg-primary/15 text-primary disabled:opacity-40"
+                      title={isEn ? 'Select next batch (continue from last pick)' : '选中下一批（从上次位置继续）'}
+                    >
+                      {isEn ? 'Next' : '下一批'}
+                    </button>
+                  </div>
 
                   {/* 按状态快速选择 */}
                   <div className="relative inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-dashed">
@@ -1579,9 +1701,88 @@ export function SubscriptionPage() {
               </CardContent>
             </Card>
           )}
+
+          {/* 批量导入链接对话框 */}
+          <ImportLinksDialog
+            open={showImportDialog}
+            onClose={() => setShowImportDialog(false)}
+            onImport={handleImportLinks}
+            isEn={isEn}
+          />
         </>
       )}
     </div>
+  )
+}
+
+// ============ 批量导入链接对话框 ============
+
+interface ImportLinksDialogProps {
+  open: boolean
+  onClose: () => void
+  onImport: (text: string) => number
+  isEn: boolean
+}
+
+function ImportLinksDialog({ open, onClose, onImport, isEn }: ImportLinksDialogProps): React.ReactNode {
+  const [text, setText] = useState('')
+  if (!open) return null
+
+  const detectedCount = parseImportedLinks(text).length
+  const handleConfirm = (): void => {
+    const n = onImport(text)
+    setText('')
+    onClose()
+    setTimeout(() => alert(isEn ? `Imported ${n} link(s)` : `成功导入 ${n} 个链接`), 0)
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
+        {/* 标题栏 */}
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <div className="flex items-center gap-2">
+            <Upload className="h-5 w-5 text-primary" />
+            <h2 className="text-lg font-semibold">{isEn ? 'Import Links' : '批量导入链接'}</h2>
+          </div>
+          <Button variant="ghost" size="sm" className="h-8 w-8 p-0 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        {/* 内容 */}
+        <div className="px-6 py-4 space-y-3 overflow-y-auto">
+          <p className="text-xs text-muted-foreground">
+            {isEn
+              ? 'Paste links, one per line. Supports plain URLs or "email<sep>url" (sep = space / comma / tab / | / ----). URLs are auto-extracted; duplicates are skipped.'
+              : '每行一个链接。支持纯 URL，或「邮箱<分隔符>URL」（分隔符可为 空格 / 逗号 / Tab / | / ----）。自动识别 URL，重复链接会跳过。'}
+          </p>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={12}
+            autoFocus
+            spellCheck={false}
+            placeholder={'https://aws.amazon.com/...\nuser@mail.com  https://aws.amazon.com/...'}
+            className="w-full rounded-lg border border-foreground/15 bg-[var(--glass-bg)] backdrop-blur-md px-3 py-2 text-sm font-mono resize-y focus-visible:outline-none focus-visible:border-primary/50 focus-visible:ring-2 focus-visible:ring-primary/30"
+          />
+          <p className="text-xs text-muted-foreground">
+            {isEn ? `Detected ${detectedCount} valid link(s)` : `已识别 ${detectedCount} 个有效链接`}
+          </p>
+        </div>
+
+        {/* 底部按钮 */}
+        <div className="flex justify-end gap-3 px-6 py-4 border-t bg-muted/30">
+          <Button variant="outline" onClick={onClose}>{isEn ? 'Cancel' : '取消'}</Button>
+          <Button disabled={detectedCount === 0} onClick={handleConfirm}>
+            <Upload className="h-4 w-4 mr-2" />
+            {isEn ? `Import (${detectedCount})` : `导入 (${detectedCount})`}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body
   )
 }
 

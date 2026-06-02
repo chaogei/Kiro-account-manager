@@ -59,3 +59,25 @@ function base64UrlEncode(buffer: Uint8Array): string {
 export function generateState(): string {
   return generateRandomString(32)
 }
+
+/**
+ * 拆分卡密/凭证行。分隔符优先级：---- > Tab > 连续空格。
+ * refreshToken/clientSecret 为 base64url(JWT)，可能以 '-' 结尾，与 '----' 相邻会形成 5+ 个连续 '-'。
+ * 用 /-{4,}/ 整体匹配分隔符，并把多出的 (N-4) 个 '-' 归还前一字段，避免 JWT 被截断、末字段(provider) 多出前导 '-'。
+ */
+export function splitCredentialLine(line: string): string[] {
+  if (line.includes('----')) {
+    const parts: string[] = []
+    const re = /-{4,}/g
+    let last = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(line)) !== null) {
+      parts.push(line.slice(last, m.index) + '-'.repeat(m[0].length - 4))
+      last = m.index + m[0].length
+    }
+    parts.push(line.slice(last))
+    return parts
+  }
+  if (line.includes('\t')) return line.split('\t')
+  return line.split(/\s{2,}/)
+}
