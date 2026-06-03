@@ -13,7 +13,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "start": "electron-vite preview",
-    "dev": "chcp 65001 >nul && electron-vite dev",
+    "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
@@ -24,10 +24,12 @@
     "test:e2e:only": "node test/e2e-fullsuite/run.mjs --only"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.2.5",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@tailwindcss/vite": "^4.1.17",
     "@tanstack/react-virtual": "^3.13.12",
+    "antd": "^6.4.3",
     "cbor-x": "^1.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

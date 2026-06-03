@@ -329,10 +329,26 @@ export const AccountCard = memo(function AccountCard({
 
   const isExpiringSoon = account.subscription.daysRemaining !== undefined &&
                          account.subscription.daysRemaining <= 7
+  const isExpiringCritical = account.subscription.daysRemaining !== undefined &&
+                             account.subscription.daysRemaining <= 3
 
   // percentUsed 是 0~1 的小数（如 0.85 = 85%），超 1 表示 >100%
   const isHighUsage = account.usage.percentUsed > 0.8
   const isCritical = account.usage.percentUsed > 1
+  const overageCapable = account.subscription.overageCapability === 'OVERAGE_CAPABLE'
+  const overageEnabled = account.usage.resourceDetail?.overageEnabled === true
+  const overageCap = account.usage.resourceDetail?.overageCap
+  const showOverageLimit = overageEnabled || overageCapable
+  const overageLimitText = typeof overageCap === 'number' ? formatUsage(overageCap) : '-'
+  const overageStatusText = overageEnabled
+    ? (isEn ? 'Enabled' : '已开启')
+    : overageCapable
+      ? (isEn ? 'Disabled' : '未开启')
+      : (isEn ? 'Not capable' : '不支持')
+  const hasDetailedQuotas =
+    (account.usage.baseLimit !== undefined && account.usage.baseLimit > 0) ||
+    (account.usage.freeTrialLimit !== undefined && account.usage.freeTrialLimit > 0) ||
+    ((account.usage.bonuses?.length ?? 0) > 0)
 
   // 检测账号是否被封禁/暂停（多种错误格式）
   const lowerError = account.lastError?.toLowerCase()
@@ -513,13 +529,13 @@ export const AccountCard = memo(function AccountCard({
       {account.isActive && isUnauthorized && (
         <div className="banned-badge" title={t('accounts.card.banned')} />
       )}
-      <CardContent className="p-4 flex-1 flex flex-col gap-3 overflow-hidden">
-        {/* Header: Checkbox, Email/Nickname, Group */}
-        <div className="flex gap-3 items-start">
+      <CardContent className="px-7 py-4 flex-1 flex flex-col gap-2 overflow-hidden">
+        {/* Header: Checkbox is offset outside the content column so content keeps 24px rhythm */}
+        <div className="relative min-w-0">
            {/* Checkbox */}
            <div
             className={cn(
-              'w-5 h-5 rounded border-2 flex items-center justify-center transition-colors flex-shrink-0 mt-0.5 cursor-pointer',
+              'absolute -left-[22px] top-0.5 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors cursor-pointer z-20',
               isSelected
                 ? 'bg-primary border-primary text-primary-foreground'
                 : 'border-muted-foreground/30 hover:border-primary'
@@ -532,7 +548,7 @@ export const AccountCard = memo(function AccountCard({
             {isSelected && <Check className="h-3.5 w-3.5" />}
           </div>
 
-           <div className="flex-1 min-w-0">
+           <div className="min-w-0">
               <div className="flex items-center justify-between gap-2">
                  <h3 
                    className={cn(
@@ -636,7 +652,7 @@ export const AccountCard = memo(function AccountCard({
         </div>
 
         {/* Usage Section */}
-        <div className="bg-muted/30 p-3 rounded-lg space-y-2 border border-border/50">
+        <div className="py-2.5 space-y-1.5 shrink-0">
             <div className="flex justify-between items-end text-xs">
                 <span className="text-muted-foreground font-medium">{isEn ? 'Usage' : '使用量'}</span>
                 <span className={cn(
@@ -706,15 +722,16 @@ export const AccountCard = memo(function AccountCard({
         </div>
 
         {/* Detailed Quotas - Compact list */}
-        <div className="space-y-1.5 min-h-0 overflow-y-auto pr-1 text-[10px] max-h-24">
+        {hasDetailedQuotas && (
+        <div className="space-y-1 min-h-0 max-h-[44px] overflow-y-auto text-[10px] leading-4">
            {/* 基础额度 */}
            {account.usage.baseLimit !== undefined && account.usage.baseLimit > 0 && (
-             <div className="flex items-center gap-2">
+             <div className="flex items-center gap-2 min-h-4 min-w-0">
                <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
                <span className="text-muted-foreground">{isEn ? 'Base:' : '基础:'}</span>
                <span className="font-medium">{formatUsage(account.usage.baseCurrent ?? 0)}/{formatUsage(account.usage.baseLimit)}</span>
                {account.usage.nextResetDate && (
-                 <span className="text-muted-foreground/70 ml-auto">
+                 <span className="text-muted-foreground/70 ml-auto shrink-0 text-right tabular-nums">
                    {isEn ? 'to' : '至'} {(() => {
                       const d = account.usage.nextResetDate as unknown
                       try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
@@ -725,12 +742,12 @@ export const AccountCard = memo(function AccountCard({
            )}
            {/* 试用额度 */}
            {account.usage.freeTrialLimit !== undefined && account.usage.freeTrialLimit > 0 && (
-             <div className="flex items-center gap-2">
+             <div className="flex items-center gap-2 min-h-4 min-w-0">
                <div className="w-1.5 h-1.5 rounded-full bg-warning flex-shrink-0" />
                <span className="text-muted-foreground">{isEn ? 'Trial:' : '试用:'}</span>
                <span className="font-medium">{formatUsage(account.usage.freeTrialCurrent ?? 0)}/{formatUsage(account.usage.freeTrialLimit)}</span>
                {account.usage.freeTrialExpiry && (
-                 <span className="text-muted-foreground/70 ml-auto">
+                 <span className="text-muted-foreground/70 ml-auto shrink-0 text-right tabular-nums">
                    {isEn ? 'to' : '至'} {(() => {
                       const d = account.usage.freeTrialExpiry as unknown
                       try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
@@ -741,12 +758,12 @@ export const AccountCard = memo(function AccountCard({
            )}
            {/* 奖励额度 */}
            {account.usage.bonuses?.map((bonus) => (
-             <div key={bonus.code} className="flex items-center gap-2">
+             <div key={bonus.code} className="flex items-center gap-2 min-h-4 min-w-0">
                <div className="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0" />
                <span className="text-muted-foreground truncate max-w-[80px]" title={bonus.name}>{bonus.name}:</span>
                <span className="font-medium">{formatUsage(bonus.current)}/{formatUsage(bonus.limit)}</span>
                {bonus.expiresAt && (
-                 <span className="text-muted-foreground/70 ml-auto">
+                 <span className="text-muted-foreground/70 ml-auto shrink-0 text-right tabular-nums">
                    {isEn ? 'to' : '至'} {(() => {
                       const d = bonus.expiresAt as unknown
                       try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
@@ -756,10 +773,42 @@ export const AccountCard = memo(function AccountCard({
              </div>
            ))}
         </div>
+        )}
+
+        {/* Overage Summary */}
+        <div className={cn('grid gap-2 text-[10px] leading-4 shrink-0', showOverageLimit ? 'grid-cols-2' : 'grid-cols-1')}>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <CreditCard className={cn(
+              'h-3.5 w-3.5 shrink-0',
+              overageEnabled ? 'text-success' : overageCapable ? 'text-warning' : 'text-muted-foreground/60'
+            )} />
+            <span className="text-muted-foreground shrink-0">{isEn ? 'Overage' : '超额'}</span>
+            <span className={cn(
+              'font-semibold truncate',
+              overageEnabled ? 'text-success' : overageCapable ? 'text-warning' : 'text-muted-foreground'
+            )}>
+              {overageStatusText}
+            </span>
+          </div>
+          {showOverageLimit && (
+            <div className="flex h-4 items-center justify-end gap-1.5 min-w-0 leading-none">
+              <span className="text-muted-foreground shrink-0">{isEn ? 'Limit' : '限制'}</span>
+              <span
+                className={cn(
+                  'font-semibold tabular-nums truncate leading-none',
+                  overageEnabled ? 'text-success' : 'text-warning'
+                )}
+                title={overageLimitText}
+              >
+                {overageLimitText}
+              </span>
+            </div>
+          )}
+        </div>
         
         {/* Tags - placed before footer */}
         {accountTags.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-auto pt-2">
+          <div className="flex flex-wrap gap-1 pt-1 shrink-0">
             {accountTags.slice(0, 4).map((tag) => (
               <span
                 key={tag.id}
@@ -777,26 +826,52 @@ export const AccountCard = memo(function AccountCard({
           </div>
         )}
 
-        {/* Footer Actions */}
-        <div className="pt-3 border-t flex items-center justify-between mt-auto gap-2 shrink-0">
-            {/* Left: Token expiry info */}
-            <div className="text-[10px] text-muted-foreground flex flex-col leading-tight gap-0.5">
-                <div className="flex items-center gap-1">
-                   <Clock className="h-3 w-3" />
-                   <span className={isExpiringSoon ? "text-warning font-medium" : ""}>
-                      {account.subscription.daysRemaining !== undefined ? (isEn ? `${account.subscription.daysRemaining}d left` : `剩 ${account.subscription.daysRemaining} 天`) : '-'}
-                   </span>
-                </div>
-                <div className="flex items-center gap-1" title={account.credentials.expiresAt ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN') : (isEn ? 'Unknown' : '未知')}>
-                   <KeyRound className="h-3 w-3" />
-                   <span className={account.credentials.expiresAt && account.credentials.expiresAt - Date.now() < 5 * 60 * 1000 ? "text-red-500 font-medium" : ""}>
-                      Token: {account.credentials.expiresAt ? formatTokenExpiry(account.credentials.expiresAt, isEn) : '-'}
-                   </span>
-                </div>
+        {/* Token / subscription time row */}
+        <div className="mt-auto pt-2 border-t flex items-center justify-between gap-2 text-[10px] text-muted-foreground leading-4 shrink-0">
+            <div
+              className="flex items-center gap-1 min-w-0"
+              title={account.credentials.expiresAt ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN') : (isEn ? 'Unknown' : '未知')}
+            >
+              <KeyRound className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                Token:{' '}
+                <span className={cn(
+                  account.credentials.expiresAt && account.credentials.expiresAt - Date.now() < 5 * 60 * 1000 && "text-red-500 font-medium"
+                )}>
+                  {account.credentials.expiresAt ? formatTokenExpiry(account.credentials.expiresAt, isEn) : '-'}
+                </span>
+              </span>
             </div>
+            <div className="flex items-center gap-1 text-right shrink-0">
+              <Clock className="h-3 w-3" />
+              {account.subscription.daysRemaining !== undefined ? (
+                <span>
+                  {isEn ? (
+                    <>
+                      <span className={cn(
+                        isExpiringCritical ? "text-red-500 font-medium" : isExpiringSoon ? "text-warning font-medium" : ""
+                      )}>
+                        {account.subscription.daysRemaining}d
+                      </span>
+                      {' left'}
+                    </>
+                  ) : (
+                    <>
+                      剩{' '}
+                      <span className={cn(
+                        isExpiringCritical ? "text-red-500 font-medium" : isExpiringSoon ? "text-warning font-medium" : ""
+                      )}>
+                        {account.subscription.daysRemaining} 天
+                      </span>
+                    </>
+                  )}
+                </span>
+              ) : '-'}
+            </div>
+        </div>
 
-            {/* Right: Actions */}
-            <div className="flex items-center gap-0.5">
+        {/* Footer Actions */}
+        <div className="-mr-2 flex items-center justify-end gap-0.5 shrink-0">
                {account.isActive ? (
                  <Button
                    size="icon"
@@ -841,7 +916,6 @@ export const AccountCard = memo(function AccountCard({
                <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors" onClick={(e) => { e.stopPropagation(); handleDelete() }} title={isEn ? 'Delete' : '删除'}>
                   <Trash2 className="h-3.5 w-3.5" />
                </Button>
-            </div>
         </div>
 
         {/* Error Message (Non-banned) */}
@@ -1035,5 +1109,3 @@ export const AccountCard = memo(function AccountCard({
     </Card>
   )
 })
-
-

@@ -76,6 +76,73 @@ interface ResourceDetail {
   overageEnabled?: boolean
 }
 
+type SkillUpdateStatus = 'unknown' | 'latest' | 'available' | 'unsupported' | 'failed'
+type SkillInstallMode = 'symlink' | 'copy'
+
+interface SkillsManagerConfig {
+  version: 1
+  defaultAutoUpdate: boolean
+  defaultInstallMode: SkillInstallMode
+  skillConfigs: Record<string, {
+    agent: string
+    skillName: string
+    autoUpdate?: boolean
+    createdAt: number
+    updatedAt: number
+  }>
+  lastSelectedAgent?: string
+}
+
+interface SkillsSkillView {
+  name: string
+  description: string
+  agent: string
+  source?: string
+  sourceType?: string
+  sourceUrl?: string
+  ref?: string
+  path: string
+  canonicalPath?: string
+  installedAt?: string
+  updatedAt?: string
+  pluginName?: string
+  autoUpdate: boolean
+  updateStatus?: SkillUpdateStatus
+  updateReason?: string
+}
+
+interface SkillsAgentView {
+  id: string
+  displayName: string
+  installed: boolean
+  universal?: boolean
+  supportsSymlinkProjection?: boolean
+  effectiveInstallMode?: SkillInstallMode | 'shared'
+  globalSkillsDir?: string
+  count: number
+  skills: SkillsSkillView[]
+}
+
+interface SkillsAgentsResult {
+  agents: SkillsAgentView[]
+  config: SkillsManagerConfig
+}
+
+interface SkillsOperationResult {
+  success: boolean
+  message?: string
+  results?: Array<{ skillName?: string; agent?: string; success: boolean; error?: string }>
+  error?: string
+}
+
+interface SkillsInstallInput {
+  source: string
+  agents: string[]
+  skills?: string[]
+  copy?: boolean
+  yes?: boolean
+}
+
 interface StatusResult {
   success: boolean
   data?: {
@@ -852,6 +919,17 @@ interface KiroApi {
   protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
 
   protonClose: () => Promise<{ success: boolean }>
+
+  // Skills 管理
+  skillsList: () => Promise<SkillsAgentsResult>
+  skillsGetConfig: () => Promise<SkillsManagerConfig>
+  skillsSaveConfig: (patch: Partial<SkillsManagerConfig>) => Promise<{ success: boolean; config?: SkillsManagerConfig; error?: string }>
+  skillsSetAutoUpdate: (input: { agent: string; skillName: string; enabled: boolean }) => Promise<SkillsOperationResult>
+  skillsInstall: (input: SkillsInstallInput) => Promise<SkillsOperationResult>
+  skillsCheckUpdate: (input: { agent: string; skillName: string }) => Promise<{ success: boolean; status: SkillUpdateStatus; reason?: string }>
+  skillsUpdate: (input: { agent: string; skillNames: string[] }) => Promise<SkillsOperationResult>
+  skillsDelete: (input: { agent: string; skillNames: string[]; allAgents?: boolean }) => Promise<SkillsOperationResult>
+  skillsSync: (input: { sourceAgent: string; skillNames: string[]; targetAgents: string[]; overwrite?: boolean }) => Promise<SkillsOperationResult>
 
   // 代理池验活
   proxyPoolValidate: (params: {

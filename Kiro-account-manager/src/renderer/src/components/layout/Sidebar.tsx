@@ -1,4 +1,4 @@
-import { Home, Users, Settings, Info, ChevronRight, Fingerprint, Sparkles, Server, Shield, UserPlus, CreditCard, ScrollText, Network, Bell, Stethoscope, Archive } from 'lucide-react'
+import { Home, Users, Settings, Info, ChevronRight, Fingerprint, Sparkles, Server, Shield, UserPlus, CreditCard, ScrollText, Network, Bell, Stethoscope, Archive, Puzzle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
@@ -6,7 +6,7 @@ import kiroLogoSmall from '@/assets/Kiro Logo.svg'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 
-export type PageType = 'home' | 'accounts' | 'machineId' | 'kiroSettings' | 'proxy' | 'kproxy' | 'proxyPool' | 'register' | 'subscription' | 'webhooks' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
+export type PageType = 'home' | 'accounts' | 'machineId' | 'kiroSettings' | 'skills' | 'proxy' | 'kproxy' | 'proxyPool' | 'register' | 'subscription' | 'webhooks' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
 
 interface SidebarProps {
   currentPage: PageType
@@ -20,6 +20,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
   { id: 'machineId', labelKey: 'nav.machineId', icon: Fingerprint },
   { id: 'kiroSettings', labelKey: 'nav.kiroSettings', icon: Sparkles },
+  { id: 'skills', labelKey: 'nav.skills', icon: Puzzle },
   { id: 'proxy', labelKey: 'nav.proxy', icon: Server },
   { id: 'kproxy', labelKey: 'nav.kproxy', icon: Shield },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
@@ -33,7 +34,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'about', labelKey: 'nav.about', icon: Info },
 ]
 
-export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse }: SidebarProps): React.ReactNode {
   const { darkMode } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -164,4 +165,3 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
     </motion.aside>
   )
 }
-

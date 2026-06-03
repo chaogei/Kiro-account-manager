@@ -22,6 +22,7 @@ import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
 import { registerProxyPoolIpcHandlers } from './ipc/proxyPool'
+import { registerSkillsManagerIpcHandlers } from './skill/ipc'
 import {
   createTray,
   destroyTray,
@@ -1934,6 +1935,7 @@ app.whenReady().then(async () => {
 
   // ============ 注册功能 IPC ============
   registerRegistrationHandlers(() => mainWindow)
+  registerSkillsManagerIpcHandlers(() => store)
 
   // ============ 托盘相关 IPC ============
 

@@ -1002,7 +1002,7 @@ const api = {
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window-is-maximized'),
     getPlatform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('window-get-platform'),
     onMaximizeChange: (callback: (isMaximized: boolean) => void): (() => void) => {
-      const handler = (_event: any, isMaximized: boolean): void => callback(isMaximized)
+      const handler = (_event: Electron.IpcRendererEvent, isMaximized: boolean): void => callback(isMaximized)
       ipcRenderer.on('window-maximize-changed', handler)
       return () => ipcRenderer.removeListener('window-maximize-changed', handler)
     }
@@ -1272,6 +1272,43 @@ const api = {
   // Proton 邮箱：关闭窗口（保留登录态）
   protonClose: (): Promise<{ success: boolean }> => {
     return ipcRenderer.invoke('proton-close')
+  },
+
+  // Skills 管理
+  skillsList: (): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:list')
+  },
+
+  skillsGetConfig: (): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:get-config')
+  },
+
+  skillsSaveConfig: (patch: unknown): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:save-config', patch)
+  },
+
+  skillsSetAutoUpdate: (input: { agent: string; skillName: string; enabled: boolean }): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:set-auto-update', input)
+  },
+
+  skillsInstall: (input: unknown): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:install', input)
+  },
+
+  skillsCheckUpdate: (input: { agent: string; skillName: string }): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:check-update', input)
+  },
+
+  skillsUpdate: (input: { agent: string; skillNames: string[] }): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:update', input)
+  },
+
+  skillsDelete: (input: { agent: string; skillNames: string[]; allAgents?: boolean }): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:delete', input)
+  },
+
+  skillsSync: (input: { sourceAgent: string; skillNames: string[]; targetAgents: string[]; overwrite?: boolean }): Promise<unknown> => {
+    return ipcRenderer.invoke('skills:sync', input)
   },
 
   // 监听注册日志
