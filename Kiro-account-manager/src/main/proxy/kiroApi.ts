@@ -186,13 +186,17 @@ const KIRO_CLI_AMZ_USER_AGENT = `aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os
 const AGENT_MODE_SPEC = 'spec' // IDE 模式
 const AGENT_MODE_VIBE = 'vibe' // CLI 模式
 
-const KIRO_BUILDER_ID_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
+// NOTE: AWS Builder ID accounts have no profile concept, so no BuilderId
+// profileArn constant is needed — see resolveProfileArn below.
 const KIRO_SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
 
-function resolveProfileArn(account: ProxyAccount): string {
+function resolveProfileArn(account: ProxyAccount): string | undefined {
   if (account.profileArn) return account.profileArn
   if (account.provider === 'Github' || account.provider === 'Google') return KIRO_SOCIAL_PROFILE_ARN
-  return KIRO_BUILDER_ID_PROFILE_ARN
+  // AWS Builder ID accounts have no profile concept. Attaching any profileArn
+  // (including the placeholder constant) makes CodeWhisperer return
+  // 403 "User is not authorized to make this call." So omit it for BuilderId.
+  return undefined
 }
 
 // Agentic 模式系统提示 - 防止大文件写入超时
@@ -327,7 +331,7 @@ function isCodeWhispererModelId(modelId: string): boolean {
 }
 
 function getModelCacheKey(account: ProxyAccount): string {
-  return `${account.id}:${account.region || 'us-east-1'}:${resolveProfileArn(account)}`
+  return `${account.id}:${account.region || 'us-east-1'}:${resolveProfileArn(account) || 'no-arn'}`
 }
 
 async function getCachedCodeWhispererModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
@@ -1202,7 +1206,9 @@ export async function callKiroApiStream(
     try {
       throwIfAborted(signal)
       const requestPayload = clonePayload(payload)
-      requestPayload.profileArn = resolveProfileArn(account)
+      const reqProfileArn = resolveProfileArn(account)
+      if (reqProfileArn) requestPayload.profileArn = reqProfileArn
+      else delete requestPayload.profileArn
       const requestedModelId = getPayloadModelId(requestPayload)
       if (endpoint.name === 'CodeWhisperer') {
         applyPayloadModelId(requestPayload, await resolveCodeWhispererModelId(account, requestedModelId, signal))
@@ -1958,7 +1964,8 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   try {
     do {
       const params = new URLSearchParams({ origin: 'AI_EDITOR', maxResults: '50' })
-      params.set('profileArn', resolveProfileArn(account))
+      const listProfileArn = resolveProfileArn(account)
+      if (listProfileArn) params.set('profileArn', listProfileArn)
       if (nextToken) params.set('nextToken', nextToken)
 
       const url = `${baseUrl}/ListAvailableModels?${params.toString()}`
@@ -2088,9 +2095,9 @@ export async function fetchSubscriptionToken(
   // clientToken 是必需参数，需要生成 UUID
   const payload: Record<string, string> = {
     clientToken: uuidv4(),
-    profileArn,
     provider: 'STRIPE'
   }
+  if (profileArn) payload.profileArn = profileArn
   if (subscriptionType) {
     payload.subscriptionType = subscriptionType
   }
