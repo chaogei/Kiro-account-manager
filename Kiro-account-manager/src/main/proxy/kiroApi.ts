@@ -48,9 +48,9 @@ export function setLogStreamEvents(enabled: boolean): void {
 }
 
 // Payload 大小限制（KB），用户可在高级设置中调整
-let payloadSizeLimitKB = 1536 // 默认 1.5MB
+let payloadSizeLimitKB = 153600 // 默认 150MB（支持大图片）
 export function setPayloadSizeLimitKB(limitKB: number): void {
-  payloadSizeLimitKB = Math.max(256, Math.min(10240, limitKB))
+  payloadSizeLimitKB = Math.max(256, Math.min(204800, limitKB))
 }
 
 // Token buffer reserve 开关（默认 false = 完全跳过 trimHistoryByTokens）
@@ -186,13 +186,18 @@ function getKiroAmzUserAgent(machineId?: string): string {
   return `aws-sdk-js/${AWS_SDK_VERSION} ${suffix}`
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const KIRO_CLI_OS = OS_PLATFORM === 'win32' ? 'windows' : OS_PLATFORM === 'macos' ? 'macos' : 'linux'
-const KIRO_CLI_USER_AGENT = `aws-sdk-rust/1.3.9 os/${KIRO_CLI_OS} lang/rust/1.87.0`
-const KIRO_CLI_AMZ_USER_AGENT = `aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/${KIRO_CLI_OS} lang/rust/1.87.0 m/E app/AmazonQ-For-CLI`
+void KIRO_CLI_OS // reserved for future kiro-cli UA
 
-// Agent 模式
-const AGENT_MODE_SPEC = 'spec' // IDE 模式
-const AGENT_MODE_VIBE = 'vibe' // CLI 模式
+// Agent 模式（可通过 setAgentMode 配置切换）
+let configuredAgentMode: 'vibe' | 'spec' = 'vibe'
+export function setAgentMode(mode: 'vibe' | 'spec'): void {
+  configuredAgentMode = mode
+}
+export function getAgentMode(): 'vibe' | 'spec' {
+  return configuredAgentMode
+}
 
 // profileArn 决策中心已迁移到 ../kiroAuthSync，反代和账号管理器主进程共用同一份定义，
 // 防止多处常量漂移。注意 KIRO_BUILDER_ID_PLACEHOLDER_ARN 仍以本模块为出口 re-export，
@@ -1175,8 +1180,8 @@ function getAccountMachineId(accountId: string, accountMachineId?: string): stri
 // 获取认证方式对应的请求头
 function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
   const machineId = getAccountMachineId(account.id, account.machineId)
-  // 官方 IDE 按 session mode 决定 agentMode，不按 provider 区分；统一用 vibe（聊天模式）
-  const agentMode = AGENT_MODE_VIBE
+  // 按配置的 agent 模式（vibe 或 spec）设置 header
+  const agentMode = configuredAgentMode
   
   const headers: Record<string, string> = {
     'content-type': 'application/json',
@@ -1463,7 +1468,7 @@ async function parseEventStream(
     reader.cancel(getAbortError(signal)).catch(() => undefined)
   }
   let buffer = new Uint8Array(0)
-  let usage = { 
+  let usage: KiroUsage = { 
     inputTokens: 0, 
     outputTokens: 0, 
     credits: 0,
@@ -1780,11 +1785,20 @@ async function parseEventStream(
               proxyLogger.debug('Kiro', 'supplementaryWebLinksEvent', JSON.stringify(webLinksEvent).slice(0, 300))
             }
             
-            // 处理 contextUsageEvent - 上下文使用百分比（反推真实 inputTokens）
+            // 处理 contextUsageEvent - 上下文使用百分比 + breakdown（Conversation/MCP tools/Steering files）
             if (eventType === 'contextUsageEvent' || event.contextUsageEvent) {
               const contextEvent = event.contextUsageEvent || event
               if (contextEvent.contextUsagePercentage !== undefined) {
                 const percentage = contextEvent.contextUsagePercentage
+                // 捕获 breakdown 并存入 usage.contextUsage
+                usage.contextUsage = {
+                  percentage,
+                  breakdown: contextEvent.breakdown ? {
+                    conversation: contextEvent.breakdown.conversation,
+                    mcpTools: contextEvent.breakdown.mcpTools,
+                    steeringFiles: contextEvent.breakdown.steeringFiles
+                  } : undefined
+                }
                 // 若已拿到真实 tokenUsage，仅记录百分比，不覆盖 inputTokens
                 if (hasRealTokenUsage) {
                   proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}% (real tokenUsage already received)`)
@@ -1798,6 +1812,9 @@ async function parseEventStream(
                   } else {
                     proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}%`)
                   }
+                }
+                if (usage.contextUsage.breakdown) {
+                  proxyLogger.info('Kiro', `contextUsage breakdown: conversation=${usage.contextUsage.breakdown.conversation || 0}% mcpTools=${usage.contextUsage.breakdown.mcpTools || 0}% steering=${usage.contextUsage.breakdown.steeringFiles || 0}%`)
                 }
                 // 如果上下文使用率超过 80%，发送警告
                 if (percentage > 80) {
@@ -1814,7 +1831,7 @@ async function parseEventStream(
                 proxyLogger.info('Kiro', `Received reasoning content (isThinking=true): ${reasoning.text.slice(0, 50)}...`)
                 onChunk(reasoning.text, undefined, true, reasoning.signature, undefined)
                 totalOutputChars += reasoning.text.length
-                usage.reasoningTokens += Math.max(1, Math.round(reasoning.text.length * 0.4))
+                usage.reasoningTokens = (usage.reasoningTokens || 0) + Math.max(1, Math.round(reasoning.text.length * 0.4))
               } else if (reasoning.signature && !reasoning.redactedContent) {
                 onChunk('', undefined, true, reasoning.signature, undefined)
               }

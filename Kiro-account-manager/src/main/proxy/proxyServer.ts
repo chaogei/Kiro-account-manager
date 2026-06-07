@@ -34,6 +34,7 @@ import {
 } from './translator'
 import { ToolNameRegistry } from './toolNameRegistry'
 import { promptCacheTracker } from './promptCacheTracker'
+import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument } from './steeringLoader'
 
 
 export interface ProxyServerEvents {
@@ -2281,6 +2282,56 @@ export class ProxyServer {
   private modelCache: { models: KiroModel[]; timestamp: number } | null = null
   private readonly MODEL_CACHE_TTL = 5 * 60 * 1000 // 5 分钟缓存
 
+  // Steering 文件缓存（从 config.workspacePath 加载）
+  private steeringDocs: SteeringDocument[] = []
+  private steeringPrompt: string = ''
+
+  /** 加载/刷新 steering 文件缓存。config.workspacePath 变化时调用。 */
+  loadSteering(): void {
+    if (!this.config.workspacePath) {
+      this.steeringDocs = []
+      this.steeringPrompt = ''
+      return
+    }
+    this.steeringDocs = loadSteeringDocuments(this.config.workspacePath)
+    this.steeringPrompt = formatSteeringForPrompt(this.steeringDocs)
+    if (this.steeringPrompt) {
+      console.log(`[ProxyServer] Loaded ${this.steeringDocs.filter(d => d.inclusion === 'always').length} steering files from ${this.config.workspacePath}`)
+    }
+  }
+
+  /** 获取格式化后的 steering prompt（注入到 system message 前面） */
+  getSteeringPrompt(): string {
+    return this.steeringPrompt
+  }
+
+  /** 注入 steering 到 OpenAI 格式请求的 messages（prepend 到 system 消息前面或新增 system 消息） */
+  private injectSteeringOpenAI(messages: OpenAIMessage[]): OpenAIMessage[] {
+    if (!this.steeringPrompt) return messages
+    // 找到第一个 system 消息并 prepend
+    const sysIdx = messages.findIndex(m => m.role === 'system')
+    if (sysIdx >= 0) {
+      const sys = messages[sysIdx]
+      const existingContent = typeof sys.content === 'string' ? sys.content : JSON.stringify(sys.content)
+      return [
+        ...messages.slice(0, sysIdx),
+        { ...sys, content: `${this.steeringPrompt}\n\n${existingContent}` },
+        ...messages.slice(sysIdx + 1)
+      ]
+    }
+    // 没有 system 消息，在最前面加一个
+    return [{ role: 'system', content: this.steeringPrompt }, ...messages]
+  }
+
+  /** 注入 steering 到 Claude 格式请求的 system 字段 */
+  private injectSteeringClaude(system?: string | ClaudeContentBlock[]): string | ClaudeContentBlock[] | undefined {
+    if (!this.steeringPrompt) return system
+    if (!system) return this.steeringPrompt
+    if (typeof system === 'string') return `${this.steeringPrompt}\n\n${system}`
+    // system 是 content block 数组，prepend 一个 text block
+    return [{ type: 'text', text: this.steeringPrompt } as ClaudeContentBlock, ...system]
+  }
+
   // 模型列表
   private async handleModels(res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
     const now = Date.now()
@@ -2448,6 +2499,11 @@ export class ProxyServer {
 
     try {
       const toolNameRegistry = new ToolNameRegistry()
+
+      // 注入 steering 到 system message
+      if (this.steeringPrompt) {
+        processedRequest.messages = this.injectSteeringOpenAI(processedRequest.messages)
+      }
 
       // 转换为 Kiro 格式
       const thinkingConfig = this.getThinkingConfig(processedRequest.model)
@@ -2866,6 +2922,11 @@ export class ProxyServer {
 
     try {
       const toolNameRegistry = new ToolNameRegistry()
+
+      // 注入 steering 到 Claude system
+      if (this.steeringPrompt) {
+        processedRequest.system = this.injectSteeringClaude(processedRequest.system) as string | undefined
+      }
 
       const claudeThinkingConfig = this.getThinkingConfig(processedRequest.model)
       const kiroPayload = claudeToKiro(processedRequest, account.profileArn, toolNameRegistry, claudeThinkingConfig)

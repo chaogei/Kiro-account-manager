@@ -366,6 +366,15 @@ export interface KiroUsage {
   cacheReadTokens?: number
   cacheWriteTokens?: number
   reasoningTokens?: number
+  /** Context usage breakdown（来自后端 ContextUsageEvent） */
+  contextUsage?: {
+    percentage: number
+    breakdown?: {
+      conversation?: number
+      mcpTools?: number
+      steeringFiles?: number
+    }
+  }
 }
 
 // ============ 账号和代理配置 ============
@@ -554,6 +563,12 @@ export interface ProxyConfig {
   fallbackPort?: number
   /** 启用审计日志（管理 API 操作、config 变更） */
   enableAuditLog?: boolean
+
+  // ============ Agent 模式 + Steering（v1.7.5 新增） ============
+  /** Agent 模式：vibe（对话优先）或 spec（计划优先）。默认 vibe */
+  agentMode?: 'vibe' | 'spec'
+  /** 工作区路径：用于读取 .kiro/steering/*.md 规则文件注入到 system prompt */
+  workspacePath?: string
 }
 
 export interface TlsConfig {

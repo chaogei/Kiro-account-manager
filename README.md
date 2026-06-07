@@ -272,7 +272,7 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ## 📋 Changelog
 
 
-### v1.7.5 (2026-6-7) — Thinking Mode + Enterprise profileArn Full Fix + Tool Use Leak Fix
+### v1.7.5 (2026-6-7) — Thinking Mode + Enterprise profileArn Full Fix + Agent Mode & Steering + Tool Use Leak Fix
 
 #### 🧠 Thinking Mode Support (Claude 4.6+)
 
@@ -298,10 +298,27 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 - **Fix**: Kiro backend occasionally sends `<tool_use id="...">...</tool_use>` XML as text content (in `assistantResponseEvent` / `codeEvent`) alongside structured `toolUseEvent` — these are now stripped from text output, preventing raw XML tags from appearing in client responses
 
+#### 🎛️ Agent Mode & Steering Support
+
+- **New**: Agent Mode selector in proxy panel — switch between **Vibe** (chat first, then build) and **Spec** (plan first, then build); controls `x-amzn-kiro-agent-mode` header sent to Kiro backend
+- **New**: Workspace Path configuration — set a local workspace path to load `.kiro/steering/*.md` rule files
+- **New**: Steering file injection — `always`-type steering documents are automatically injected into every request's system prompt (supports YAML frontmatter with `inclusion: always/fileMatch/manual`)
+- **New**: Context Usage breakdown parsing — captures `ContextUsageEvent` breakdown (Conversation / MCP tools / Steering files) from Kiro backend stream responses
+- **New**: `steeringLoader.ts` module — reads, parses frontmatter, and formats steering files for prompt injection
+
+#### 🔧 Enterprise Switch-to-IDE Fix
+
+- **Fix**: `resolveProfileArnForWrite` returned BuilderId placeholder ARN for Enterprise accounts when switching to IDE — IDE then used this invalid ARN causing "Invalid token" error. Now returns region-aware Enterprise fallback ARN
+- **Fix**: All 5 call sites of `resolveProfileArnForWrite` now pass `region` parameter for correct Enterprise ARN generation
+
 #### 🗑️ Subscription: Delete Failed Accounts
 
 - **New**: "Delete accounts" checkbox next to "Remove Failed" button in batch subscription link view — when checked, removing failed/expired links also permanently deletes the corresponding accounts (for banned account cleanup)
 - **New**: Button turns red when checkbox is active; confirmation dialog warns about permanent account deletion
+
+#### ⚡ Payload Size Limit
+
+- **Change**: Default payload size limit increased from 1.5MB to **150MB** (153600 KB) to support large image attachments; max configurable limit raised to 200MB
 
 ---
 

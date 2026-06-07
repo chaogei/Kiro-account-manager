@@ -16,7 +16,7 @@ import {
   type KProxyConfig,
   type DeviceIdMapping
 } from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback, setAgentMode } from './proxy/kiroApi'
 import {
   writeKiroAuthTokenFile,
   readKiroAuthTokenFile,
@@ -345,6 +345,10 @@ function initProxyServer(): ProxyServer {
   if (config.tokenBufferReserve) {
     setTokenBufferReserve(config.tokenBufferReserve)
   }
+  // 恢复 Agent 模式（vibe / spec）
+  if (config.agentMode) {
+    setAgentMode(config.agentMode)
+  }
 
   proxyServer = new ProxyServer(
     config,
@@ -534,6 +538,9 @@ function initProxyServer(): ProxyServer {
   if (savedTotalRequests > 0 || savedSuccessRequests > 0 || savedFailedRequests > 0) {
     proxyServer.setRequestStats(savedTotalRequests, savedSuccessRequests, savedFailedRequests)
   }
+
+  // 加载 Steering 文件（如果配置了工作区路径）
+  proxyServer.loadSteering()
 
   return proxyServer
 }
@@ -1688,7 +1695,8 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
   const resolvedProfileArn = resolveProfileArnForWrite({
     profileArn: account.profileArn,
     authMethod: creds.authMethod,
-    provider: creds.provider
+    provider: creds.provider,
+    region: creds.region
   })
 
   // 1. 写磁盘（同步给 IDE）
@@ -2864,7 +2872,8 @@ app.whenReady().then(async () => {
           const resolvedProfileArn = resolveProfileArnForWrite({
             profileArn: account.profileArn,
             authMethod,
-            provider
+            provider,
+            region
           })
           await writeKiroAuthTokenFile({
             accessToken: newAccess,
@@ -3542,7 +3551,8 @@ app.whenReady().then(async () => {
                     const resolvedProfileArn = resolveProfileArnForWrite({
                       profileArn: diskToken?.profileArn,
                       authMethod,
-                      provider
+                      provider,
+                      region
                     })
                     await writeKiroAuthTokenFile({
                       accessToken: newAccessToken,
@@ -4600,11 +4610,12 @@ app.whenReady().then(async () => {
         }
       }
 
-      // profileArn 决策统一由 helper：BuilderId 永远返回 undefined（不写占位符）
+      // profileArn 决策统一由 helper：Enterprise 用区域化备用 ARN，BuilderId 用占位符
       const resolvedProfileArn = resolveProfileArnForWrite({
         profileArn,
         authMethod,
-        provider
+        provider,
+        region
       })
 
       // bug C 修复：用真实 expiresIn 算 expiresAt
@@ -4713,7 +4724,8 @@ app.whenReady().then(async () => {
       const resolvedProfileArn = resolveProfileArnForWrite({
         profileArn,
         authMethod: isSocial ? 'social' : 'IdC',
-        provider
+        provider,
+        region
       })
 
       // 构建 token JSON（snake_case 字段名，与 kiro-cli Rust 结构一致）
@@ -5966,6 +5978,14 @@ app.whenReady().then(async () => {
       }
       if (config.tokenBufferReserve !== undefined) {
         setTokenBufferReserve(config.tokenBufferReserve)
+      }
+      // 同步 Agent 模式
+      if (config.agentMode) {
+        setAgentMode(config.agentMode)
+      }
+      // 工作区路径变化时重新加载 steering
+      if (config.workspacePath !== undefined) {
+        server.loadSteering()
       }
       // 保存配置到 store（用于自启动）
       if (store) {

@@ -84,6 +84,9 @@ interface ProxyConfig {
   multiAccountSelectionMode?: 'all' | 'groups'
   multiAccountGroupIds?: string[]
   modelMappings?: ModelMappingRule[]
+  // Agent 模式 + Steering
+  agentMode?: 'vibe' | 'spec'
+  workspacePath?: string
   // v1.8 安全 / 限流 / 可观测
   maxRequestBodyBytes?: number
   allowedIPs?: string[]
@@ -987,11 +990,11 @@ export function ProxyPanel() {
                   id="payloadSizeLimit"
                   type="number"
                   min={256}
-                  max={10240}
-                  step={128}
-                  value={config.payloadSizeLimitKB || 1536}
+                  max={204800}
+                  step={1024}
+                  value={config.payloadSizeLimitKB || 153600}
                   onChange={(e) => {
-                    const kb = parseInt(e.target.value) || 1536
+                    const kb = parseInt(e.target.value) || 153600
                     setConfig(prev => ({ ...prev, payloadSizeLimitKB: kb }))
                     window.api.proxyUpdateConfig({ payloadSizeLimitKB: kb })
                   }}
@@ -1063,6 +1066,40 @@ export function ProxyPanel() {
                     disabled={isRunning || !config.enableTokenBufferReserve}
                     placeholder={isEn ? 'Reserve tokens (default 20000)' : '预留 token 数（默认 20000）'}
                     className="h-9 flex-1"
+                  />
+                </div>
+              </div>
+              {/* Agent Mode + Workspace Path（Steering 文件注入） */}
+              <div className="col-span-3 grid grid-cols-3 gap-x-3 items-end">
+                <div className="space-y-1.5">
+                  <Label className="text-xs" title={isEn ? 'Agent mode sent to Kiro backend. Vibe=chat-first, Spec=plan-first.' : 'Kiro 后端 Agent 模式。Vibe=对话优先，Spec=计划优先。'}>{isEn ? 'Agent Mode' : 'Agent 模式'}</Label>
+                  <Select
+                    value={config.agentMode || 'vibe'}
+                    options={[
+                      { value: 'vibe', label: 'Vibe', description: isEn ? 'Chat first, then build' : '对话优先，边聊边做' },
+                      { value: 'spec', label: 'Spec', description: isEn ? 'Plan first, then build' : '先规划后执行' }
+                    ]}
+                    onChange={(value) => {
+                      const mode = value as 'vibe' | 'spec'
+                      setConfig(prev => ({ ...prev, agentMode: mode }))
+                      window.api.proxyUpdateConfig({ agentMode: mode })
+                    }}
+                    placeholder={isEn ? 'Select mode' : '选择模式'}
+                  />
+                </div>
+                <div className="col-span-2 space-y-1.5">
+                  <Label className="text-xs" title={isEn ? 'Workspace path for loading .kiro/steering/*.md rules into system prompt' : '工作区路径，用于加载 .kiro/steering/*.md 规则注入到 system prompt'}>{isEn ? 'Workspace Path (Steering)' : '工作区路径 (Steering)'}</Label>
+                  <Input
+                    value={config.workspacePath || ''}
+                    onChange={(e) => {
+                      const p = e.target.value
+                      setConfig(prev => ({ ...prev, workspacePath: p || undefined }))
+                    }}
+                    onBlur={() => {
+                      window.api.proxyUpdateConfig({ workspacePath: config.workspacePath || undefined })
+                    }}
+                    placeholder={isEn ? 'e.g. C:/Projects/my-app (optional)' : '如 C:/Projects/my-app（可选）'}
+                    className="h-9"
                   />
                 </div>
               </div>

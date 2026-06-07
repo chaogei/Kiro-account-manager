@@ -67,12 +67,17 @@ export function resolveProfileArnForWrite(input: {
   profileArn?: string
   authMethod?: string
   provider?: string
+  region?: string
 }): string | undefined {
   if (input.profileArn && !isPlaceholderProfileArn(input.profileArn)) {
     return input.profileArn
   }
   if (input.authMethod === 'social' || input.provider === 'Github' || input.provider === 'Google') {
     return KIRO_SOCIAL_PROFILE_ARN
+  }
+  // Enterprise 不能用 BuilderId 占位符（IDE 调接口会 Invalid token）
+  if (input.provider === 'Enterprise' || input.authMethod === 'external_idp') {
+    return getEnterpriseFallbackArn(input.region)
   }
   return KIRO_BUILDER_ID_PLACEHOLDER_ARN
 }

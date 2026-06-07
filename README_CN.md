@@ -272,7 +272,7 @@ npx electron-builder --linux --arm64
 ## 📋 更新日志
 
 
-### v1.7.5 (2026-6-7) — 思考模式支持 + Enterprise profileArn 完整修复 + 工具调用泄漏修复
+### v1.7.5 (2026-6-7) — 思考模式支持 + Enterprise profileArn 完整修复 + Agent 模式与 Steering + 工具调用泄漏修复
 
 #### 🧠 思考模式支持（Claude 4.6+）
 
@@ -298,10 +298,27 @@ npx electron-builder --linux --arm64
 
 - **修复**: Kiro 后端偶尔在文本内容（`assistantResponseEvent` / `codeEvent`）中夹带 `<tool_use id="...">...</tool_use>` XML（与结构化 `toolUseEvent` 并发）— 现在从文本输出中过滤这些 XML 标签，防止客户端显示原始标签
 
+#### 🎛️ Agent 模式与 Steering 支持
+
+- **新增**: 反代面板新增 **Agent Mode** 下拉 — 可切换 **Vibe**（对话优先，边聊边做）和 **Spec**（先规划后执行）；控制发给 Kiro 后端的 `x-amzn-kiro-agent-mode` header
+- **新增**: 工作区路径配置 — 设置本地工作区根目录，用于加载 `.kiro/steering/*.md` 规则文件
+- **新增**: Steering 文件注入 — `always` 类型的 steering 文档自动注入到每个请求的 system prompt 前面（支持 YAML frontmatter `inclusion: always/fileMatch/manual`）
+- **新增**: Context Usage breakdown 解析 — 从 Kiro 后端流式响应的 `ContextUsageEvent` 中捕获三项占比（Conversation / MCP tools / Steering files）
+- **新增**: `steeringLoader.ts` 模块 — 读取、解析 frontmatter、格式化 steering 文件用于 prompt 注入
+
+#### 🔧 Enterprise 切号到 IDE 修复
+
+- **修复**: `resolveProfileArnForWrite` 在 Enterprise 账号切号到 IDE 时返回了 BuilderId 占位符 ARN — IDE 使用该无效 ARN 导致 "Invalid token" 错误。现改为返回区域化 Enterprise 备用 ARN
+- **修复**: 所有 5 处 `resolveProfileArnForWrite` 调用点均补传 `region` 参数，确保 Enterprise ARN 区域正确
+
 #### 🗑️ 批量订阅：删除失败账号
 
 - **新增**: 批量订阅获取链接界面的"清失败"按钮旁新增「连删账号」勾选框 — 勾选后移除失败/过期链接时同时永久删除对应账号（用于清理封号账号）
 - **新增**: 勾选时按钮变红色警告样式，确认弹窗提示"并永久删除账号"
+
+#### ⚡ Payload 大小限制
+
+- **调整**: Payload 默认大小限制从 1.5MB 提升到 **150MB**（153600 KB），支持大图片附件；最大可配置上限提升到 200MB
 
 ---
 
