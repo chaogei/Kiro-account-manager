@@ -1497,6 +1497,135 @@ async function parseEventStream(
   let currentToolUse: ToolUseState | null = null
   const processedIds = new Set<string>()
 
+  // ===== 工具调用 XML 泄漏修复（跨帧解析 + 流结束去重）=====
+  // 背景：Kiro 后端偶尔把模型的工具调用 XML（<function_calls>/<invoke>/<parameter>，
+  //       <function_calls> 有时被损坏成纯文本 "count"）当普通文本，混在
+  //       assistantResponseEvent / codeEvent 里【流式分帧】发出。原先的逐帧
+  //       `content.replace(/<tool_use.../)` 只覆盖 <tool_use> 且无法匹配跨帧分片的标签，
+  //       导致：原始 XML 泄漏成可见文本，且客户端解析不到工具调用 → 工具不执行、任务中断。
+  // 方案：用有状态的跨帧过滤器分离「正常文本」与「泄漏的工具调用」；正常文本照常输出，
+  //       泄漏工具解析为结构化 tool_use 暂存；流结束时与已见的结构化 toolUseEvent 去重
+  //       （同名同参丢弃，避免重复执行）后注入救回。
+  // 开关：环境变量 KIRO_TOOL_LEAK_FIX=off 可回退到原逐帧 <tool_use> 过滤。
+  const toolLeakFixEnabled = (process.env.KIRO_TOOL_LEAK_FIX || 'on').toLowerCase().trim() !== 'off'
+  const toolLeakDebug = process.env.KIRO_TOOL_LEAK_DEBUG === '1'
+  let leakCarry = ''
+  const leakedTools: Array<{ name: string; input: Record<string, unknown> }> = []
+  const seenToolSigs = new Set<string>()
+  let leakIdCounter = 0
+  const toolSig = (name: string, input: Record<string, unknown>): string => {
+    const sortedKeys = Object.keys(input).sort()
+    const norm: Record<string, unknown> = {}
+    for (const k of sortedKeys) norm[k] = input[k]
+    return name + '|' + JSON.stringify(norm)
+  }
+  const parseInvokeBody = (name: string, body: string): { name: string; input: Record<string, unknown> } => {
+    const input: Record<string, unknown> = {}
+    const re = /<parameter name="([^"]+)">([\s\S]*?)<\/parameter>/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(body)) !== null) {
+      const key = m[1]
+      const raw = m[2]
+      const t = raw.trim()
+      // 类型还原：布尔/数字/null 转换，其余保留原字符串（保留内部空白，如 command/old_string）
+      if (t === 'true') input[key] = true
+      else if (t === 'false') input[key] = false
+      else if (t === 'null') input[key] = null
+      else if (/^-?\d+$/.test(t)) input[key] = parseInt(t, 10)
+      else if (/^-?\d*\.\d+$/.test(t)) input[key] = parseFloat(t)
+      else input[key] = raw
+    }
+    return { name, input }
+  }
+  const stripToolPrefix = (pre: string): string => {
+    const fc = pre.match(/<function_calls>\s*$/)
+    if (fc) return pre.slice(0, pre.length - fc[0].length)
+    const ct = pre.match(/count\s*$/)
+    if (ct) return pre.slice(0, pre.length - ct[0].length)
+    return pre
+  }
+  const hasOpenInvoke = (s: string): boolean => {
+    const i = s.lastIndexOf('<invoke name=')
+    if (i === -1) return false
+    return !s.slice(i).includes('</invoke>')
+  }
+  const pendingToolTail = (s: string): number => {
+    const markers = ['<function_calls>', '<invoke name=', '</invoke>', '</function_calls>', '<parameter name=', '</parameter>', 'count']
+    let hold = 0
+    for (const tag of markers) {
+      for (let k = Math.min(s.length, tag.length - 1); k >= 1; k--) {
+        if (s.slice(s.length - k) === tag.slice(0, k)) {
+          if (k > hold) hold = k
+          break
+        }
+      }
+    }
+    const cm = s.match(/count\s*$/)
+    if (cm && cm[0].length > hold) hold = cm[0].length
+    const cm2 = s.match(/count\s*<[\s\S]*$/)
+    if (cm2 && cm2[0].length > hold) hold = cm2[0].length
+    return hold
+  }
+  // 处理 leakCarry：正常文本经 onChunk 输出，泄漏工具暂存 leakedTools。isFlush 时吐出残留。
+  const filterToolLeak = (isFlush: boolean): void => {
+    const emit = (s: string): void => {
+      if (!s) return
+      onChunk(s)
+      totalOutputChars += s.length
+      collectedOutputText += s
+    }
+    // 提取所有已闭合的 invoke
+    for (;;) {
+      const fi = leakCarry.indexOf('<invoke name=')
+      if (fi === -1) break
+      const ci = leakCarry.indexOf('</invoke>', fi)
+      if (ci === -1) break // 未闭合，等更多帧
+      emit(stripToolPrefix(leakCarry.slice(0, fi)))
+      const localRe = /<invoke name="([^"]+)">([\s\S]*?)<\/invoke>/g
+      localRe.lastIndex = fi
+      let m: RegExpExecArray | null
+      let consumedEnd = ci + '</invoke>'.length
+      while ((m = localRe.exec(leakCarry)) !== null) {
+        if (m.index > consumedEnd + 30) break
+        const tool = parseInvokeBody(m[1], m[2])
+        leakedTools.push(tool)
+        if (toolLeakDebug) {
+          try {
+            console.log('[tool-leak-fix] parsed leaked tool:', tool.name, JSON.stringify(tool.input).slice(0, 120))
+          } catch {
+            /* ignore */
+          }
+        }
+        consumedEnd = m.index + m[0].length
+      }
+      const fcClose = leakCarry.slice(consumedEnd).match(/^\s*<\/function_calls>/)
+      if (fcClose) consumedEnd += fcClose[0].length
+      leakCarry = leakCarry.slice(consumedEnd)
+    }
+    if (hasOpenInvoke(leakCarry)) {
+      if (isFlush) {
+        // 流结束仍未闭合 = 损坏的工具调用，原样当文本输出（不丢字符）
+        emit(leakCarry)
+        leakCarry = ''
+        return
+      }
+      const oi = leakCarry.indexOf('<invoke name=')
+      const safe = stripToolPrefix(leakCarry.slice(0, oi))
+      emit(safe)
+      leakCarry = leakCarry.slice(safe.length)
+      return
+    }
+    if (isFlush) {
+      emit(leakCarry)
+      leakCarry = ''
+      return
+    }
+    const hold = pendingToolTail(leakCarry)
+    emit(leakCarry.slice(0, leakCarry.length - hold))
+    leakCarry = leakCarry.slice(leakCarry.length - hold)
+  }
+  // ===== 工具调用 XML 泄漏修复 end =====
+
   try {
     throwIfAborted(signal)
     signal?.addEventListener('abort', abort, { once: true })
@@ -1552,16 +1681,20 @@ async function parseEventStream(
             // 根据 event type 处理不同类型的事件
             if (eventType === 'assistantResponseEvent' || event.assistantResponseEvent) {
               const assistantResp = event.assistantResponseEvent || event
-              let content = assistantResp.content as string | undefined
+              const content = assistantResp.content as string | undefined
               if (content) {
-                // 过滤 Kiro 后端偶尔在文本中夹带的 <tool_use> XML（结构化 toolUseEvent 已单独处理）
-                content = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
-                if (content) {
-                  onChunk(content)
-                  // 累积输出字符长度（兜底估算用）
-                  totalOutputChars += content.length
-                  // 累积输出文本（tiktoken 精确计算用）
-                  collectedOutputText += content
+                if (toolLeakFixEnabled) {
+                  // 跨帧过滤：分离正常文本与泄漏的工具调用 XML
+                  leakCarry += content
+                  filterToolLeak(false)
+                } else {
+                  // 回退：原逐帧 <tool_use> 过滤
+                  const stripped = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
+                  if (stripped) {
+                    onChunk(stripped)
+                    totalOutputChars += stripped.length
+                    collectedOutputText += stripped
+                  }
                 }
               }
             }
@@ -1571,13 +1704,18 @@ async function parseEventStream(
             // CodeWhisperer/AmazonQ 端点用 AssistantResponseEvent 包代码，CLI 端点单独用 CodeEvent
             if (eventType === 'codeEvent' || event.codeEvent) {
               const codeResp = event.codeEvent || event
-              let content = codeResp.content as string | undefined
+              const content = codeResp.content as string | undefined
               if (content) {
-                content = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
-                if (content) {
-                  onChunk(content)
-                  totalOutputChars += content.length
-                  collectedOutputText += content
+                if (toolLeakFixEnabled) {
+                  leakCarry += content
+                  filterToolLeak(false)
+                } else {
+                  const stripped = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
+                  if (stripped) {
+                    onChunk(stripped)
+                    totalOutputChars += stripped.length
+                    collectedOutputText += stripped
+                  }
                 }
               }
             }
@@ -1613,6 +1751,9 @@ async function parseEventStream(
                       name: currentToolUse.name,
                       input: finalInput
                     })
+                    if (toolLeakFixEnabled) {
+                      try { seenToolSigs.add(toolSig(currentToolUse.name, finalInput)) } catch { /* ignore */ }
+                    }
                     totalOutputChars += currentToolUse.name.length + currentToolUse.inputBuffer.length
                     processedIds.add(currentToolUse.toolUseId)
                   }
@@ -1669,8 +1810,11 @@ async function parseEventStream(
                   name: currentToolUse.name,
                   input: finalInput
                 })
+                if (toolLeakFixEnabled && !parseError) {
+                  try { seenToolSigs.add(toolSig(currentToolUse.name, finalInput)) } catch { /* ignore */ }
+                }
                 totalOutputChars += currentToolUse.name.length + currentToolUse.inputBuffer.length
-                
+
                 // 如果解析失败，额外发送一条文本消息告知用户
                 if (parseError) {
                   onChunk(`\n\n⚠️ Tool "${currentToolUse.name}" input was truncated by Kiro API. The output may be incomplete due to token limits.`)
@@ -1937,7 +2081,12 @@ async function parseEventStream(
         buffer = buffer.slice(totalLength)
       }
     }
-    
+
+    // 工具调用 XML 泄漏修复：flush 过滤器残留文本
+    if (toolLeakFixEnabled) {
+      try { filterToolLeak(true) } catch { /* ignore */ }
+    }
+
     // 完成任何未完成的 tool use
     if (currentToolUse && !processedIds.has(currentToolUse.toolUseId)) {
       let finalInput: Record<string, unknown> = {}
@@ -1951,9 +2100,35 @@ async function parseEventStream(
         name: currentToolUse.name,
         input: finalInput
       })
+      if (toolLeakFixEnabled) {
+        try { seenToolSigs.add(toolSig(currentToolUse.name, finalInput)) } catch { /* ignore */ }
+      }
       totalOutputChars += currentToolUse.name.length + currentToolUse.inputBuffer.length
     }
-    
+
+    // 工具调用 XML 泄漏修复：流结束统一去重后注入救回的工具
+    // 与已见的结构化 toolUseEvent 同名同参的丢弃（避免重复执行），其余注入为结构化 tool_use
+    if (toolLeakFixEnabled && leakedTools.length > 0) {
+      let rescued = 0
+      let deduped = 0
+      for (const lt of leakedTools) {
+        let sig: string
+        try { sig = toolSig(lt.name, lt.input) } catch { sig = lt.name + '|?' }
+        if (seenToolSigs.has(sig)) {
+          deduped++
+          continue
+        }
+        seenToolSigs.add(sig)
+        leakIdCounter++
+        const rescuedId = `toolleakfix_${Date.now().toString(36)}_${leakIdCounter.toString(36)}`
+        onChunk('', { toolUseId: rescuedId, name: lt.name, input: lt.input })
+        rescued++
+      }
+      if (rescued > 0 || toolLeakDebug) {
+        proxyLogger.info('Kiro', `Tool-leak-fix: leaked=${leakedTools.length} rescued=${rescued} deduped=${deduped}`)
+      }
+    }
+
     // 如果 API 没有返回 token 信息，优先用 tiktoken 精确计算，兜底字符系数
     if (usage.outputTokens === 0 && totalOutputChars > 0) {
       if (collectedOutputText) {
