@@ -2,7 +2,24 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, type PageType } from './components/layout'
-import { HomePage, AboutPage, SettingsPage, MachineIdPage, KiroSettingsPage, SkillsPage, ProxyPage, KProxyPage, ProxyPoolPage, WebhooksPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
+import {
+  HomePage,
+  AboutPage,
+  SettingsPage,
+  MachineIdPage,
+  KiroSettingsPage,
+  SkillsPage,
+  McpPage,
+  ProxyPage,
+  KProxyPage,
+  ProxyPoolPage,
+  WebhooksPage,
+  DiagnosePage,
+  ConfigSyncPage,
+  RegisterPage,
+  SubscriptionPage,
+  LogsPage
+} from './components/pages'
 import { useWebhookStore } from './store/webhooks'
 import { UpdateDialog } from './components/UpdateDialog'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
@@ -33,10 +50,10 @@ function App(): React.JSX.Element {
 
   // 切换到下一个可用账户
   const switchToNextAccount = useCallback(() => {
-    const activeAccounts = Array.from(accounts.values()).filter(acc => acc.status === 'active')
+    const activeAccounts = Array.from(accounts.values()).filter((acc) => acc.status === 'active')
     if (activeAccounts.length <= 1) return
 
-    const currentIndex = activeAccounts.findIndex(acc => acc.id === activeAccountId)
+    const currentIndex = activeAccounts.findIndex((acc) => acc.id === activeAccountId)
     const nextIndex = (currentIndex + 1) % activeAccounts.length
     setActiveAccount(activeAccounts[nextIndex].id)
   }, [accounts, activeAccountId, setActiveAccount])
@@ -51,7 +68,7 @@ function App(): React.JSX.Element {
       const currentAccounts = currentState.accounts
       const currentActiveId = currentState.activeAccountId
 
-      const accountList = Array.from(currentAccounts.values()).map(acc => ({
+      const accountList = Array.from(currentAccounts.values()).map((acc) => ({
         id: acc.id,
         email: acc.email || 'Unknown',
         idp: acc.idp || 'Unknown',
@@ -68,13 +85,15 @@ function App(): React.JSX.Element {
             idp: activeAccount.idp || 'Unknown',
             status: activeAccount.status,
             subscription: activeAccount.subscription?.title || undefined,
-            usage: activeAccount.usage ? {
-              usedCredits: activeAccount.usage.current || 0,
-              totalCredits: activeAccount.usage.limit || 0,
-              totalRequests: 0,
-              successRequests: 0,
-              failedRequests: 0
-            } : undefined
+            usage: activeAccount.usage
+              ? {
+                  usedCredits: activeAccount.usage.current || 0,
+                  totalCredits: activeAccount.usage.limit || 0,
+                  totalRequests: 0,
+                  successRequests: 0,
+                  failedRequests: 0
+                }
+              : undefined
           })
         } else {
           window.api.updateTrayAccount(null)
@@ -113,10 +132,13 @@ function App(): React.JSX.Element {
         // 规范化 level（main 用 'error'/'info' 等字符串字面量，需要映射到 store 接受的类型）
         const rawLevel = (payload as { level?: string })?.level
         const level: 'info' | 'warn' | 'error' | 'success' =
-          rawLevel === 'error' ? 'error'
-          : rawLevel === 'info' ? 'info'
-          : rawLevel === 'success' ? 'success'
-          : 'warn'
+          rawLevel === 'error'
+            ? 'error'
+            : rawLevel === 'info'
+              ? 'info'
+              : rawLevel === 'success'
+                ? 'success'
+                : 'warn'
         void store.triggerEvent(targetEvent, {
           title: String((payload as Record<string, unknown>).title ?? '反代告警'),
           message: String((payload as Record<string, unknown>).message ?? ''),
@@ -127,7 +149,9 @@ function App(): React.JSX.Element {
         console.error('[App] Proxy webhook trigger failed:', err)
       }
     })
-    return () => { unsubscribe?.() }
+    return () => {
+      unsubscribe?.()
+    }
   }, [])
 
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
@@ -142,7 +166,9 @@ function App(): React.JSX.Element {
 
   // 关闭/刷新前强制 flush 防抖中的待保存数据，防止数据丢失
   useEffect(() => {
-    const handleBeforeUnload = (): void => { void flushSaveImmediately() }
+    const handleBeforeUnload = (): void => {
+      void flushSaveImmediately()
+    }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -178,7 +204,8 @@ function App(): React.JSX.Element {
 
   // 监听后台刷新结果：缓冲 + 批量化 flush，N 条结果合并为一次 set，消除 Map 复制风暴
   useEffect(() => {
-    const refreshBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> = []
+    const refreshBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> =
+      []
     let flushTimer: ReturnType<typeof setTimeout> | null = null
 
     const flush = (): void => {
@@ -255,6 +282,8 @@ function App(): React.JSX.Element {
         return <KiroSettingsPage />
       case 'skills':
         return <SkillsPage />
+      case 'mcp':
+        return <McpPage />
       case 'proxy':
         return <ProxyPage />
       case 'kproxy':

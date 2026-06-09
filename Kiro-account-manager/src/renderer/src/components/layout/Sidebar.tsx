@@ -1,4 +1,23 @@
-import { Home, Users, Settings, Info, ChevronRight, Fingerprint, Sparkles, Server, Shield, UserPlus, CreditCard, ScrollText, Network, Bell, Stethoscope, Archive, Puzzle } from 'lucide-react'
+import {
+  Home,
+  Users,
+  Settings,
+  Info,
+  ChevronRight,
+  Fingerprint,
+  Sparkles,
+  Server,
+  Shield,
+  UserPlus,
+  CreditCard,
+  ScrollText,
+  Network,
+  Bell,
+  Stethoscope,
+  Archive,
+  Puzzle,
+  Plug
+} from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
@@ -6,7 +25,24 @@ import kiroLogoSmall from '@/assets/Kiro Logo.svg'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 
-export type PageType = 'home' | 'accounts' | 'machineId' | 'kiroSettings' | 'skills' | 'proxy' | 'kproxy' | 'proxyPool' | 'register' | 'subscription' | 'webhooks' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
+export type PageType =
+  | 'home'
+  | 'accounts'
+  | 'machineId'
+  | 'kiroSettings'
+  | 'skills'
+  | 'mcp'
+  | 'proxy'
+  | 'kproxy'
+  | 'proxyPool'
+  | 'register'
+  | 'subscription'
+  | 'webhooks'
+  | 'diagnose'
+  | 'configSync'
+  | 'logs'
+  | 'settings'
+  | 'about'
 
 interface SidebarProps {
   currentPage: PageType
@@ -21,6 +57,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'machineId', labelKey: 'nav.machineId', icon: Fingerprint },
   { id: 'kiroSettings', labelKey: 'nav.kiroSettings', icon: Sparkles },
   { id: 'skills', labelKey: 'nav.skills', icon: Puzzle },
+  { id: 'mcp', labelKey: 'nav.mcp', icon: Plug },
   { id: 'proxy', labelKey: 'nav.proxy', icon: Server },
   { id: 'kproxy', labelKey: 'nav.kproxy', icon: Shield },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
@@ -31,10 +68,15 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings },
-  { id: 'about', labelKey: 'nav.about', icon: Info },
+  { id: 'about', labelKey: 'nav.about', icon: Info }
 ]
 
-export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse }: SidebarProps): React.ReactNode {
+export function Sidebar({
+  currentPage,
+  onPageChange,
+  collapsed,
+  onToggleCollapse
+}: SidebarProps): React.ReactNode {
   const { darkMode } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -112,7 +154,9 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
                   transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                 />
               )}
-              <Icon className={cn('h-5 w-5 shrink-0 relative z-10', isActive ? 'text-white' : '')} />
+              <Icon
+                className={cn('h-5 w-5 shrink-0 relative z-10', isActive ? 'text-white' : '')}
+              />
               <AnimatePresence initial={false}>
                 {!collapsed && (
                   <motion.span
@@ -137,7 +181,7 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
         <button
           onClick={onToggleCollapse}
           className="group w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm text-muted-foreground hover:text-primary hover:bg-white/40 dark:hover:bg-white/5 transition-all overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-          title={collapsed ? (isEn ? 'Expand' : '展开侧边栏') : (isEn ? 'Collapse' : '收起侧边栏')}
+          title={collapsed ? (isEn ? 'Expand' : '展开侧边栏') : isEn ? 'Collapse' : '收起侧边栏'}
         >
           <motion.div
             animate={{ rotate: collapsed ? 0 : 180 }}

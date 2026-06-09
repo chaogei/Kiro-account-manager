@@ -47,6 +47,7 @@ const zh = {
     machineId: '机器码',
     kiroSettings: 'Kiro 设置',
     skills: 'Skills 管理',
+    mcp: 'MCP 管理',
     proxy: 'API 反代',
     kproxy: 'K-Proxy',
     proxyPool: '代理池',
@@ -451,7 +452,8 @@ const zh = {
     parentEmailPlaceholder: 'your-name@gmail.com',
     parentEmailHint: '可选。开启匿名邮箱时必填；关闭时留空则在初始化后手动输入。',
     anonymousEmailLabel: '随机匿名邮箱（点号变体）',
-    anonymousEmailHint: '从母邮箱注入 `.` 生成不同变体（Gmail/iCloud 等忽略点号），优先 1 个点 → 2 个点递增。每次生成会查询本地账号库存避免重复。',
+    anonymousEmailHint:
+      '从母邮箱注入 `.` 生成不同变体（Gmail/iCloud 等忽略点号），优先 1 个点 → 2 个点递增。每次生成会查询本地账号库存避免重复。',
     nextVariant: '下一个变体',
     dotCount: '点号数',
     sameRoot: '同根已用',

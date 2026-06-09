@@ -108,13 +108,16 @@ interface SkillsManagerConfig {
   version: 1
   defaultAutoUpdate: boolean
   defaultInstallMode: SkillInstallMode
-  skillConfigs: Record<string, {
-    agent: string
-    skillName: string
-    autoUpdate?: boolean
-    createdAt: number
-    updatedAt: number
-  }>
+  skillConfigs: Record<
+    string,
+    {
+      agent: string
+      skillName: string
+      autoUpdate?: boolean
+      createdAt: number
+      updatedAt: number
+    }
+  >
   lastSelectedAgent?: string
 }
 
@@ -166,6 +169,87 @@ interface SkillsInstallInput {
   skills?: string[]
   copy?: boolean
   yes?: boolean
+}
+
+type McpTransport = 'stdio' | 'http' | 'sse'
+type McpSyncStatus = 'created' | 'updated' | 'skipped' | 'deleted' | 'failed'
+
+interface ManagedMcpServer {
+  name: string
+  title?: string
+  description?: string
+  transport: McpTransport
+  command?: string
+  args?: string[]
+  cwd?: string
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  disabled?: boolean
+  autoApprove?: string[]
+  disabledTools?: string[]
+  timeout?: number
+  source?: 'manual' | 'imported' | 'kiro-settings'
+  createdAt: number
+  updatedAt: number
+}
+
+interface McpManagerConfig {
+  version: 1
+  servers: Record<string, ManagedMcpServer>
+  managedKeys: string[]
+  lastSelectedAgent?: string
+  autoSyncOnStartup: boolean
+  lastSyncAt?: string
+}
+
+interface McpAgentView {
+  id: string
+  displayName: string
+  installed: boolean
+  supported: boolean
+  configPath?: string
+  count: number
+  servers: Array<{
+    name: string
+    managed: boolean
+    synced: boolean
+    nativeTransport: string
+    configPath: string
+    server?: ManagedMcpServer
+    warning?: string
+  }>
+}
+
+interface McpListResult {
+  servers: ManagedMcpServer[]
+  agents: McpAgentView[]
+  config: McpManagerConfig
+}
+
+interface McpSyncEntry {
+  serverName?: string
+  agent: string
+  success: boolean
+  status: McpSyncStatus
+  configPath?: string
+  error?: string
+}
+
+interface McpOperationResult {
+  success: boolean
+  message?: string
+  results?: McpSyncEntry[]
+  server?: ManagedMcpServer
+  config?: McpManagerConfig
+  error?: string
+}
+
+interface McpSyncResult {
+  success: boolean
+  results: McpSyncEntry[]
+  syncedAt: string
+  error?: string
 }
 
 interface StatusResult {
@@ -224,42 +308,57 @@ interface KiroApi {
   checkAccountStatus: (account: unknown) => Promise<StatusResult>
 
   // 后台批量刷新（主进程执行，不阻塞 UI）
-  backgroundBatchRefresh: (accounts: Array<{
-    id: string
-    email: string
-    idp?: string
-    needsTokenRefresh?: boolean
-    machineId?: string  // 账户绑定的设备 ID
-    credentials: {
-      refreshToken: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      accessToken?: string
-      provider?: string
-    }
-  }>, concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
-  onBackgroundRefreshResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
+  backgroundBatchRefresh: (
+    accounts: Array<{
+      id: string
+      email: string
+      idp?: string
+      needsTokenRefresh?: boolean
+      machineId?: string // 账户绑定的设备 ID
+      credentials: {
+        refreshToken: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        accessToken?: string
+        provider?: string
+      }
+    }>,
+    concurrency?: number,
+    syncInfo?: boolean
+  ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
+  onBackgroundRefreshProgress: (
+    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
+  ) => () => void
+  onBackgroundRefreshResult: (
+    callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
+  ) => () => void
 
   // 后台批量检查账号状态（不刷新 Token）
-  backgroundBatchCheck: (accounts: Array<{
-    id: string
-    email: string
-    credentials: {
-      accessToken: string
-      refreshToken?: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      provider?: string
-    }
-    idp?: string
-  }>, concurrency?: number) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundCheckProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
-  onBackgroundCheckResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
+  backgroundBatchCheck: (
+    accounts: Array<{
+      id: string
+      email: string
+      credentials: {
+        accessToken: string
+        refreshToken?: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        provider?: string
+      }
+      idp?: string
+    }>,
+    concurrency?: number
+  ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
+  onBackgroundCheckProgress: (
+    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
+  ) => () => void
+  onBackgroundCheckResult: (
+    callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
+  ) => () => void
 
   // 切换账号 - 写入凭证到本地 SSO 缓存
   switchAccount: (credentials: {
@@ -299,8 +398,8 @@ interface KiroApi {
     clientId: string
     clientSecret: string
     region?: string
-    authMethod?: string  // 'IdC' 或 'social'
-    provider?: string    // 'BuilderId', 'Github', 'Google'
+    authMethod?: string // 'IdC' 或 'social'
+    provider?: string // 'BuilderId', 'Github', 'Google'
   }) => Promise<{
     success: boolean
     data?: {
@@ -325,7 +424,13 @@ interface KiroApi {
         freeTrialLimit?: number
         freeTrialCurrent?: number
         freeTrialExpiry?: string
-        bonuses?: Array<{ code: string; name: string; current: number; limit: number; expiresAt?: string }>
+        bonuses?: Array<{
+          code: string
+          name: string
+          current: number
+          limit: number
+          expiresAt?: string
+        }>
         nextResetDate?: string
         resourceDetail?: {
           displayName?: string
@@ -365,14 +470,17 @@ interface KiroApi {
       clientId: string
       clientSecret: string
       region: string
-      authMethod: string  // 'IdC' 或 'social'
-      provider: string    // 'BuilderId', 'Github', 'Google'
+      authMethod: string // 'IdC' 或 'social'
+      provider: string // 'BuilderId', 'Github', 'Google'
     }
     error?: string
   }>
 
   // 从 AWS SSO Token (x-amz-sso_authn) 导入账号
-  importFromSsoToken: (bearerToken: string, region?: string) => Promise<{
+  importFromSsoToken: (
+    bearerToken: string,
+    region?: string
+  ) => Promise<{
     success: boolean
     data?: {
       accessToken: string
@@ -400,7 +508,13 @@ interface KiroApi {
         freeTrialLimit?: number
         freeTrialCurrent?: number
         freeTrialExpiry?: string
-        bonuses?: Array<{ code: string; name: string; current: number; limit: number; expiresAt?: string }>
+        bonuses?: Array<{
+          code: string
+          name: string
+          current: number
+          limit: number
+          expiresAt?: string
+        }>
         nextResetDate?: string
         resourceDetail?: {
           displayName?: string
@@ -448,7 +562,10 @@ interface KiroApi {
   cancelBuilderIdLogin: () => Promise<{ success: boolean }>
 
   // 启动 IAM Identity Center SSO 登录 (Authorization Code flow)
-  startIamSsoLogin: (startUrl: string, region?: string) => Promise<{
+  startIamSsoLogin: (
+    startUrl: string,
+    region?: string
+  ) => Promise<{
     success: boolean
     authorizeUrl?: string
     expiresIn?: number
@@ -473,7 +590,10 @@ interface KiroApi {
   cancelIamSsoLogin: () => Promise<{ success: boolean }>
 
   // 启动 Social Auth 登录 (Google/GitHub)
-  startSocialLogin: (provider: 'Google' | 'Github', usePrivateMode?: boolean) => Promise<{
+  startSocialLogin: (
+    provider: 'Google' | 'Github',
+    usePrivateMode?: boolean
+  ) => Promise<{
     success: boolean
     loginUrl?: string
     state?: string
@@ -481,7 +601,10 @@ interface KiroApi {
   }>
 
   // 交换 Social Auth token
-  exchangeSocialToken: (code: string, state: string) => Promise<{
+  exchangeSocialToken: (
+    code: string,
+    state: string
+  ) => Promise<{
     success: boolean
     accessToken?: string
     refreshToken?: string
@@ -496,10 +619,15 @@ interface KiroApi {
   cancelSocialLogin: () => Promise<{ success: boolean }>
 
   // 监听 Social Auth 回调
-  onSocialAuthCallback: (callback: (data: { code?: string; state?: string; error?: string }) => void) => () => void
+  onSocialAuthCallback: (
+    callback: (data: { code?: string; state?: string; error?: string }) => void
+  ) => () => void
 
   // 代理设置
-  setProxy: (enabled: boolean, url: string) => Promise<{ success: boolean; error?: string; normalizedUrl?: string }>
+  setProxy: (
+    enabled: boolean,
+    url: string
+  ) => Promise<{ success: boolean; error?: string; normalizedUrl?: string }>
 
   // ============ 机器码管理 API ============
 
@@ -577,10 +705,21 @@ interface KiroApi {
 
   // 监听更新事件
   onUpdateChecking: (callback: () => void) => () => void
-  onUpdateAvailable: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => () => void
+  onUpdateAvailable: (
+    callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void
+  ) => () => void
   onUpdateNotAvailable: (callback: (info: { version: string }) => void) => () => void
-  onUpdateDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => () => void
-  onUpdateDownloaded: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => () => void
+  onUpdateDownloadProgress: (
+    callback: (progress: {
+      percent: number
+      bytesPerSecond: number
+      transferred: number
+      total: number
+    }) => void
+  ) => () => void
+  onUpdateDownloaded: (
+    callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void
+  ) => () => void
   onUpdateError: (callback: (error: string) => void) => () => void
 
   // ============ Kiro 设置管理 API ============
@@ -600,7 +739,9 @@ interface KiroApi {
   }>
 
   // 保存 Kiro 设置
-  saveKiroSettings: (settings: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>
+  saveKiroSettings: (
+    settings: Record<string, unknown>
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 打开 Kiro MCP 配置文件
   openKiroMcpConfig: (type: 'user' | 'workspace') => Promise<{ success: boolean; error?: string }>
@@ -618,10 +759,15 @@ interface KiroApi {
   createKiroDefaultRules: () => Promise<{ success: boolean; error?: string }>
 
   // 读取 Steering 文件内容
-  readKiroSteeringFile: (filename: string) => Promise<{ success: boolean; content?: string; error?: string }>
+  readKiroSteeringFile: (
+    filename: string
+  ) => Promise<{ success: boolean; content?: string; error?: string }>
 
   // 保存 Steering 文件内容
-  saveKiroSteeringFile: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>
+  saveKiroSteeringFile: (
+    filename: string,
+    content: string
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 删除 Steering 文件
   deleteKiroSteeringFile: (filename: string) => Promise<{ success: boolean; error?: string }>
@@ -629,7 +775,11 @@ interface KiroApi {
   // ============ MCP 服务器管理 ============
 
   // 保存 MCP 服务器配置
-  saveMcpServer: (name: string, config: { command: string; args?: string[]; env?: Record<string, string> }, oldName?: string) => Promise<{ success: boolean; error?: string }>
+  saveMcpServer: (
+    name: string,
+    config: { command: string; args?: string[]; env?: Record<string, string> },
+    oldName?: string
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 删除 MCP 服务器
   deleteMcpServer: (name: string) => Promise<{ success: boolean; error?: string }>
@@ -637,13 +787,33 @@ interface KiroApi {
   // ============ Kiro API 反代服务器 ============
 
   // 启动反代服务器
-  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }) => Promise<{ success: boolean; port?: number; error?: string }>
+  proxyStart: (config?: {
+    port?: number
+    host?: string
+    apiKey?: string
+    enableMultiAccount?: boolean
+    logRequests?: boolean
+    clientDrivenToolExecution?: boolean
+    disableTools?: boolean
+    modelThinkingMode?: Record<string, boolean>
+    thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think'
+  }) => Promise<{ success: boolean; port?: number; error?: string }>
 
   // 停止反代服务器
   proxyStop: () => Promise<{ success: boolean; error?: string }>
 
   // 获取反代服务器状态
-  proxyGetStatus: () => Promise<{ running: boolean; config: unknown; stats: unknown; sessionStats?: { totalRequests: number; successRequests: number; failedRequests: number; startTime: number } }>
+  proxyGetStatus: () => Promise<{
+    running: boolean
+    config: unknown
+    stats: unknown
+    sessionStats?: {
+      totalRequests: number
+      successRequests: number
+      failedRequests: number
+      startTime: number
+    }
+  }>
 
   // 重置累计 credits
   proxyResetCredits: () => Promise<{ success: boolean }>
@@ -655,7 +825,11 @@ interface KiroApi {
   proxyResetRequestStats: () => Promise<{ success: boolean }>
 
   // 获取反代详细日志
-  proxyGetLogs: (count?: number) => Promise<Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>>
+  proxyGetLogs: (
+    count?: number
+  ) => Promise<
+    Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
+  >
 
   // 清除反代详细日志
   proxyClearLogs: () => Promise<{ success: boolean }>
@@ -664,24 +838,80 @@ interface KiroApi {
   proxyGetLogsCount: () => Promise<number>
 
   // 更新反代服务器配置
-  proxyUpdateConfig: (config: Record<string, unknown>) => Promise<{ success: boolean; config?: unknown; error?: string }>
+  proxyUpdateConfig: (
+    config: Record<string, unknown>
+  ) => Promise<{ success: boolean; config?: unknown; error?: string }>
 
   // ============ v1.8 反代安全 / 可观测 IPC ============
-  proxySelfSignedCertInfo: () => Promise<{ success: boolean; cert?: string; key?: string; fingerprint?: string; notBefore?: number; notAfter?: number; subject?: string; altNames?: string[]; error?: string }>
-  proxySelfSignedCertRegenerate: () => Promise<{ success: boolean; cert?: string; key?: string; fingerprint?: string; notBefore?: number; notAfter?: number; subject?: string; altNames?: string[]; error?: string }>
+  proxySelfSignedCertInfo: () => Promise<{
+    success: boolean
+    cert?: string
+    key?: string
+    fingerprint?: string
+    notBefore?: number
+    notAfter?: number
+    subject?: string
+    altNames?: string[]
+    error?: string
+  }>
+  proxySelfSignedCertRegenerate: () => Promise<{
+    success: boolean
+    cert?: string
+    key?: string
+    fingerprint?: string
+    notBefore?: number
+    notAfter?: number
+    subject?: string
+    altNames?: string[]
+    error?: string
+  }>
   proxyNeedsRestart: () => Promise<{ needsRestart: boolean }>
   proxyRestart: () => Promise<{ success: boolean; error?: string }>
-  proxyAuditLog: () => Promise<{ entries: Array<{ ts: number; type: string; data: Record<string, unknown> }> }>
-  onProxyWebhookTrigger: (callback: (event: string, payload: Record<string, unknown>) => void) => (() => void)
+  proxyAuditLog: () => Promise<{
+    entries: Array<{ ts: number; type: string; data: Record<string, unknown> }>
+  }>
+  onProxyWebhookTrigger: (
+    callback: (event: string, payload: Record<string, unknown>) => void
+  ) => () => void
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyAddAccount: (account: {
+    id: string
+    email?: string
+    accessToken: string
+    refreshToken?: string
+    profileArn?: string
+    expiresAt?: number
+    clientId?: string
+    clientSecret?: string
+    region?: string
+    authMethod?: string
+    provider?: string
+    machineId?: string
+  }) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 从反代池移除账号
-  proxyRemoveAccount: (accountId: string) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyRemoveAccount: (
+    accountId: string
+  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxySyncAccounts: (
+    accounts: Array<{
+      id: string
+      email?: string
+      accessToken: string
+      refreshToken?: string
+      profileArn?: string
+      expiresAt?: number
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      provider?: string
+      machineId?: string
+    }>
+  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 获取反代池账号列表
   proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>
@@ -696,45 +926,176 @@ interface KiroApi {
   proxyRefreshModels: () => Promise<{ success: boolean; error?: string }>
 
   // 获取可用模型列表
-  proxyGetModels: () => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache?: boolean }>
+  proxyGetModels: () => Promise<{
+    success: boolean
+    error?: string
+    models: Array<{
+      id: string
+      name: string
+      description: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+      rateMultiplier?: number
+      rateUnit?: string
+    }>
+    fromCache?: boolean
+  }>
 
-  proxyConfigureClients: (input: { clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>; modelId: string; modelName?: string; models?: Array<{ id: string; name?: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null }> }) => Promise<{ success: boolean; error?: string; proxyOrigin: string; openaiBaseUrl: string; results: Array<{ client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'; success: boolean; paths: string[]; backupPaths: string[]; error?: string }> }>
+  proxyConfigureClients: (input: {
+    clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>
+    modelId: string
+    modelName?: string
+    models?: Array<{
+      id: string
+      name?: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+    }>
+  }) => Promise<{
+    success: boolean
+    error?: string
+    proxyOrigin: string
+    openaiBaseUrl: string
+    results: Array<{
+      client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
+      success: boolean
+      paths: string[]
+      backupPaths: string[]
+      error?: string
+    }>
+  }>
 
   // 获取账户可用模型列表
-  accountGetModels: (accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }>
+  accountGetModels: (
+    accessToken: string,
+    region?: string,
+    profileArn?: string,
+    machineId?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{
+    success: boolean
+    error?: string
+    models: Array<{
+      id: string
+      name: string
+      description: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+      rateMultiplier?: number
+      rateUnit?: string
+    }>
+  }>
 
   // 获取可用订阅列表
-  accountGetSubscriptions: (accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }>
+  accountGetSubscriptions: (
+    accessToken: string,
+    region?: string,
+    profileArn?: string,
+    machineId?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{
+    success: boolean
+    error?: string
+    plans: Array<{
+      name: string
+      qSubscriptionType: string
+      description: {
+        title: string
+        billingInterval: string
+        featureHeader: string
+        features: string[]
+      }
+      pricing: { amount: number; currency: string }
+    }>
+    disclaimer?: string[]
+  }>
 
   // 获取订阅管理/支付链接
-  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
+  accountGetSubscriptionUrl: (
+    accessToken: string,
+    subscriptionType?: string,
+    region?: string,
+    profileArn?: string,
+    machineId?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
 
   // 设置用户超额偏好
-  accountSetOverage: (accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string }>
+  accountSetOverage: (
+    accessToken: string,
+    overageStatus: 'ENABLED' | 'DISABLED',
+    region?: string,
+    profileArn?: string,
+    machineId?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 在新窗口打开订阅链接
   openSubscriptionWindow: (url: string) => Promise<{ success: boolean; error?: string }>
 
   // 保存代理日志
-  proxySaveLogs: (logs: Array<{ time: string; path: string; status: number; tokens?: number }>) => Promise<{ success: boolean; error?: string }>
+  proxySaveLogs: (
+    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 加载代理日志
-  proxyLoadLogs: () => Promise<{ success: boolean; logs: Array<{ time: string; path: string; status: number; tokens?: number }> }>
+  proxyLoadLogs: () => Promise<{
+    success: boolean
+    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
+  }>
 
   // 监听反代请求事件
-  onProxyRequest: (callback: (info: { path: string; method: string; accountId?: string }) => void) => () => void
+  onProxyRequest: (
+    callback: (info: { path: string; method: string; accountId?: string }) => void
+  ) => () => void
 
   // 监听反代响应事件
-  onProxyResponse: (callback: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string }) => void) => () => void
+  onProxyResponse: (
+    callback: (info: {
+      path: string
+      model?: string
+      status: number
+      tokens?: number
+      inputTokens?: number
+      outputTokens?: number
+      cacheReadTokens?: number
+      cacheWriteTokens?: number
+      reasoningTokens?: number
+      credits?: number
+      responseTime?: number
+      error?: string
+    }) => void
+  ) => () => void
 
   // 监听反代错误事件
   onProxyError: (callback: (error: string) => void) => () => void
 
   // 监听反代状态变化事件
-  onProxyStatusChange: (callback: (status: { running: boolean; port: number }) => void) => () => void
+  onProxyStatusChange: (
+    callback: (status: { running: boolean; port: number }) => void
+  ) => () => void
 
   // 监听反代账号被封禁事件（TEMPORARILY_SUSPENDED / AccountSuspendedException）
-  onProxyAccountSuspended: (callback: (info: { id: string; email?: string; reason: string; message: string; suspendedAt: number }) => void) => () => void
+  onProxyAccountSuspended: (
+    callback: (info: {
+      id: string
+      email?: string
+      reason: string
+      message: string
+      suspendedAt: number
+    }) => void
+  ) => () => void
 
   // ============ Usage API 类型设置 ============
 
@@ -753,19 +1114,40 @@ interface KiroApi {
   // ============ K-Proxy MITM 代理 ============
 
   // 初始化 K-Proxy
-  kproxyInit: () => Promise<{ success: boolean; caInfo?: { certPath: string; fingerprint: string; validFrom: string; validTo: string }; error?: string }>
+  kproxyInit: () => Promise<{
+    success: boolean
+    caInfo?: { certPath: string; fingerprint: string; validFrom: string; validTo: string }
+    error?: string
+  }>
 
   // 启动 K-Proxy
-  kproxyStart: (config?: { port?: number; host?: string; mitmDomains?: string[]; deviceId?: string }) => Promise<{ success: boolean; port?: number; error?: string }>
+  kproxyStart: (config?: {
+    port?: number
+    host?: string
+    mitmDomains?: string[]
+    deviceId?: string
+  }) => Promise<{ success: boolean; port?: number; error?: string }>
 
   // 停止 K-Proxy
   kproxyStop: () => Promise<{ success: boolean; error?: string }>
 
   // 获取 K-Proxy 状态
-  kproxyGetStatus: () => Promise<{ running: boolean; config: unknown; stats: unknown; caInfo: unknown }>
+  kproxyGetStatus: () => Promise<{
+    running: boolean
+    config: unknown
+    stats: unknown
+    caInfo: unknown
+  }>
 
   // 更新 K-Proxy 配置
-  kproxyUpdateConfig: (config: { port?: number; host?: string; mitmDomains?: string[]; deviceId?: string; autoStart?: boolean; logRequests?: boolean }) => Promise<{ success: boolean; config?: unknown; error?: string }>
+  kproxyUpdateConfig: (config: {
+    port?: number
+    host?: string
+    mitmDomains?: string[]
+    deviceId?: string
+    autoStart?: boolean
+    logRequests?: boolean
+  }) => Promise<{ success: boolean; config?: unknown; error?: string }>
 
   // 设置当前设备 ID
   kproxySetDeviceId: (deviceId: string) => Promise<{ success: boolean; error?: string }>
@@ -774,33 +1156,132 @@ interface KiroApi {
   kproxyGenerateDeviceId: () => Promise<{ success: boolean; deviceId?: string }>
 
   // 添加设备 ID 映射
-  kproxyAddDeviceMapping: (mapping: { accountId: string; deviceId: string; description?: string; createdAt: number }) => Promise<{ success: boolean; error?: string }>
+  kproxyAddDeviceMapping: (mapping: {
+    accountId: string
+    deviceId: string
+    description?: string
+    createdAt: number
+  }) => Promise<{ success: boolean; error?: string }>
 
   // 获取所有设备 ID 映射
-  kproxyGetDeviceMappings: () => Promise<{ success: boolean; mappings: Array<{ accountId: string; deviceId: string; description?: string; createdAt: number; lastUsed?: number }> }>
+  kproxyGetDeviceMappings: () => Promise<{
+    success: boolean
+    mappings: Array<{
+      accountId: string
+      deviceId: string
+      description?: string
+      createdAt: number
+      lastUsed?: number
+    }>
+  }>
 
   // 切换到账号设备 ID
   kproxySwitchToAccount: (accountId: string) => Promise<{ success: boolean; error?: string }>
 
   // 获取 CA 证书
-  kproxyGetCaCert: () => Promise<{ success: boolean; certPem?: string; certPath?: string; fingerprint?: string; error?: string }>
+  kproxyGetCaCert: () => Promise<{
+    success: boolean
+    certPem?: string
+    certPath?: string
+    fingerprint?: string
+    error?: string
+  }>
 
   // 导出 CA 证书
-  kproxyExportCaCert: (exportPath?: string) => Promise<{ success: boolean; path?: string; error?: string }>
+  kproxyExportCaCert: (
+    exportPath?: string
+  ) => Promise<{ success: boolean; path?: string; error?: string }>
 
   // 检查 CA 证书是否已安装
-  kproxyCheckCaCertInstalled: () => Promise<{ success: boolean; installed: boolean; error?: string }>
+  kproxyCheckCaCertInstalled: () => Promise<{
+    success: boolean
+    installed: boolean
+    error?: string
+  }>
 
   // ============ API Key 管理 ============
 
   // 获取所有 API Keys
-  proxyGetApiKeys: () => Promise<{ success: boolean; apiKeys: Array<{ id: string; name: string; key: string; enabled: boolean; createdAt: number; lastUsedAt?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }>; error?: string }>
+  proxyGetApiKeys: () => Promise<{
+    success: boolean
+    apiKeys: Array<{
+      id: string
+      name: string
+      key: string
+      enabled: boolean
+      createdAt: number
+      lastUsedAt?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }>
+    error?: string
+  }>
 
   // 添加 API Key
-  proxyAddApiKey: (apiKey: { name: string; key?: string; format?: 'sk' | 'simple' | 'token'; creditsLimit?: number }) => Promise<{ success: boolean; apiKey?: { id: string; name: string; key: string; format?: 'sk' | 'simple' | 'token'; enabled: boolean; createdAt: number; creditsLimit?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }; error?: string }>
+  proxyAddApiKey: (apiKey: {
+    name: string
+    key?: string
+    format?: 'sk' | 'simple' | 'token'
+    creditsLimit?: number
+  }) => Promise<{
+    success: boolean
+    apiKey?: {
+      id: string
+      name: string
+      key: string
+      format?: 'sk' | 'simple' | 'token'
+      enabled: boolean
+      createdAt: number
+      creditsLimit?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }
+    error?: string
+  }>
 
   // 更新 API Key
-  proxyUpdateApiKey: (id: string, updates: { name?: string; key?: string; enabled?: boolean; creditsLimit?: number | null }) => Promise<{ success: boolean; apiKey?: { id: string; name: string; key: string; format?: 'sk' | 'simple' | 'token'; enabled: boolean; createdAt: number; creditsLimit?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }; error?: string }>
+  proxyUpdateApiKey: (
+    id: string,
+    updates: { name?: string; key?: string; enabled?: boolean; creditsLimit?: number | null }
+  ) => Promise<{
+    success: boolean
+    apiKey?: {
+      id: string
+      name: string
+      key: string
+      format?: 'sk' | 'simple' | 'token'
+      enabled: boolean
+      createdAt: number
+      creditsLimit?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }
+    error?: string
+  }>
 
   // 删除 API Key
   proxyDeleteApiKey: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -818,16 +1299,34 @@ interface KiroApi {
   kproxyResetStats: () => Promise<{ success: boolean }>
 
   // 监听 K-Proxy 请求事件
-  onKproxyRequest: (callback: (info: { timestamp: number; method: string; host: string; path: string; isMitm: boolean; deviceIdReplaced: boolean }) => void) => () => void
+  onKproxyRequest: (
+    callback: (info: {
+      timestamp: number
+      method: string
+      host: string
+      path: string
+      isMitm: boolean
+      deviceIdReplaced: boolean
+    }) => void
+  ) => () => void
 
   // 监听 K-Proxy 响应事件
-  onKproxyResponse: (callback: (info: { timestamp: number; host: string; statusCode: number; duration: number }) => void) => () => void
+  onKproxyResponse: (
+    callback: (info: {
+      timestamp: number
+      host: string
+      statusCode: number
+      duration: number
+    }) => void
+  ) => () => void
 
   // 监听 K-Proxy 错误事件
   onKproxyError: (callback: (error: string) => void) => () => void
 
   // 监听 K-Proxy 状态变化事件
-  onKproxyStatusChange: (callback: (status: { running: boolean; port: number }) => void) => () => void
+  onKproxyStatusChange: (
+    callback: (status: { running: boolean; port: number }) => void
+  ) => () => void
 
   // 监听 K-Proxy MITM 拦截事件
   onKproxyMitm: (callback: (info: { host: string; modified: boolean }) => void) => () => void
@@ -863,28 +1362,32 @@ interface KiroApi {
   }) => Promise<{ success: boolean; error?: string }>
 
   // 更新托盘当前账户信息
-  updateTrayAccount: (account: {
-    id: string
-    email: string
-    idp: string
-    status: string
-    subscription?: string
-    usage?: {
-      usedCredits: number
-      totalCredits: number
-      totalRequests: number
-      successRequests: number
-      failedRequests: number
-    }
-  } | null) => void
+  updateTrayAccount: (
+    account: {
+      id: string
+      email: string
+      idp: string
+      status: string
+      subscription?: string
+      usage?: {
+        usedCredits: number
+        totalCredits: number
+        totalRequests: number
+        successRequests: number
+        failedRequests: number
+      }
+    } | null
+  ) => void
 
   // 更新托盘账户列表
-  updateTrayAccountList: (accounts: {
-    id: string
-    email: string
-    idp: string
-    status: string
-  }[]) => void
+  updateTrayAccountList: (
+    accounts: {
+      id: string
+      email: string
+      idp: string
+      status: string
+    }[]
+  ) => void
 
   // 刷新托盘菜单
   refreshTrayMenu: () => void
@@ -902,7 +1405,10 @@ interface KiroApi {
   onShowCloseConfirmDialog: (callback: () => void) => () => void
 
   // 发送关闭确认对话框响应
-  sendCloseConfirmResponse: (action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean) => void
+  sendCloseConfirmResponse: (
+    action: 'minimize' | 'quit' | 'cancel',
+    rememberChoice: boolean
+  ) => void
 
   // ============ 注册功能 API ============
 
@@ -931,15 +1437,22 @@ interface KiroApi {
     fullName?: string
   }) => Promise<{ success: boolean; error?: string }>
 
-  registrationManualPhase2: (email: string, fullName?: string) => Promise<{ success: boolean; error?: string }>
+  registrationManualPhase2: (
+    email: string,
+    fullName?: string
+  ) => Promise<{ success: boolean; error?: string }>
 
-  registrationManualPhase3: (otp: string) => Promise<{ success: boolean; result?: unknown; error?: string }>
+  registrationManualPhase3: (
+    otp: string
+  ) => Promise<{ success: boolean; result?: unknown; error?: string }>
 
   registrationCancel: () => Promise<{ success: boolean }>
 
   registrationStatus: () => Promise<{ inProgress: boolean }>
 
-  protonOpenLogin: (proxy?: string) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
+  protonOpenLogin: (
+    proxy?: string
+  ) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
 
   protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
 
@@ -948,22 +1461,131 @@ interface KiroApi {
   // Skills 管理
   skillsList: () => Promise<SkillsAgentsResult>
   skillsGetConfig: () => Promise<SkillsManagerConfig>
-  skillsSaveConfig: (patch: Partial<SkillsManagerConfig>) => Promise<{ success: boolean; config?: SkillsManagerConfig; error?: string }>
-  skillsSetAutoUpdate: (input: { agent: string; skillName: string; enabled: boolean }) => Promise<SkillsOperationResult>
+  skillsSaveConfig: (
+    patch: Partial<SkillsManagerConfig>
+  ) => Promise<{ success: boolean; config?: SkillsManagerConfig; error?: string }>
+  skillsSetAutoUpdate: (input: {
+    agent: string
+    skillName: string
+    enabled: boolean
+  }) => Promise<SkillsOperationResult>
   skillsInstall: (input: SkillsInstallInput) => Promise<SkillsOperationResult>
-  skillsCheckUpdate: (input: { agent: string; skillName: string }) => Promise<{ success: boolean; status: SkillUpdateStatus; reason?: string }>
+  skillsCheckUpdate: (input: {
+    agent: string
+    skillName: string
+  }) => Promise<{ success: boolean; status: SkillUpdateStatus; reason?: string }>
   skillsUpdate: (input: { agent: string; skillNames: string[] }) => Promise<SkillsOperationResult>
-  skillsDelete: (input: { agent: string; skillNames: string[]; allAgents?: boolean }) => Promise<SkillsOperationResult>
-  skillsSync: (input: { sourceAgent: string; skillNames: string[]; targetAgents: string[]; overwrite?: boolean }) => Promise<SkillsOperationResult>
+  skillsDelete: (input: {
+    agent: string
+    skillNames: string[]
+    allAgents?: boolean
+  }) => Promise<SkillsOperationResult>
+  skillsSync: (input: {
+    sourceAgent: string
+    skillNames: string[]
+    targetAgents: string[]
+    overwrite?: boolean
+  }) => Promise<SkillsOperationResult>
 
   // Skills Auto-Update
-  skillsCheckUpdateBatch: (input: { agent?: string }) => Promise<{ success: boolean; results?: Array<{ agent: string; skillName: string; status: SkillUpdateStatus; reason?: string }>; error?: string }>
-  skillsSetCheckInterval: (input: { minutes: number }) => Promise<{ success: boolean; error?: string }>
-  skillsBatchSetAutoUpdate: (input: { skillKeys: string[]; enabled: boolean }) => Promise<{ success: boolean; error?: string }>
-  skillsNormalize: () => Promise<{ success: boolean; normalized?: Array<{ skillName: string; agents: string[] }>; conflicts?: Array<{ skillName: string; reason: string }>; errors?: Array<{ skillName: string; agent: string; reason: string }>; error?: string }>
-  skillsConvertToSymlink: (input: { agentId: string }) => Promise<{ success: boolean; converted?: Array<{ skillName: string }>; skipped?: Array<{ skillName: string; reason: string }>; errors?: Array<{ skillName: string; reason: string }>; error?: string }>
-  skillsGetUpdateHistory: (input: { skillName: string }) => Promise<{ success: boolean; history?: Array<{ skillName: string; agent: string; timestamp: string; previousHash: string; newHash: string; success: boolean }>; error?: string }>
-  skillsGetLastBatchResult: () => Promise<{ success: boolean; result?: { successes: Array<{ agent: string; skillName: string; previousHash: string; newHash: string }>; failures: Array<{ agent: string; skillName: string; reason: string }>; timestamp: string } | null; error?: string }>
+  skillsCheckUpdateBatch: (input: {
+    agent?: string
+  }) => Promise<{
+    success: boolean
+    results?: Array<{
+      agent: string
+      skillName: string
+      status: SkillUpdateStatus
+      reason?: string
+    }>
+    error?: string
+  }>
+  skillsSetCheckInterval: (input: {
+    minutes: number
+  }) => Promise<{ success: boolean; error?: string }>
+  skillsBatchSetAutoUpdate: (input: {
+    skillKeys: string[]
+    enabled: boolean
+  }) => Promise<{ success: boolean; error?: string }>
+  skillsNormalize: () => Promise<{
+    success: boolean
+    normalized?: Array<{ skillName: string; agents: string[] }>
+    conflicts?: Array<{ skillName: string; reason: string }>
+    errors?: Array<{ skillName: string; agent: string; reason: string }>
+    error?: string
+  }>
+  skillsConvertToSymlink: (input: {
+    agentId: string
+  }) => Promise<{
+    success: boolean
+    converted?: Array<{ skillName: string }>
+    skipped?: Array<{ skillName: string; reason: string }>
+    errors?: Array<{ skillName: string; reason: string }>
+    error?: string
+  }>
+  skillsGetUpdateHistory: (input: {
+    skillName: string
+  }) => Promise<{
+    success: boolean
+    history?: Array<{
+      skillName: string
+      agent: string
+      timestamp: string
+      previousHash: string
+      newHash: string
+      success: boolean
+    }>
+    error?: string
+  }>
+  skillsGetLastBatchResult: () => Promise<{
+    success: boolean
+    result?: {
+      successes: Array<{ agent: string; skillName: string; previousHash: string; newHash: string }>
+      failures: Array<{ agent: string; skillName: string; reason: string }>
+      timestamp: string
+    } | null
+    error?: string
+  }>
+  skillsDeleteSkill: (input: { skillName: string }) => Promise<SkillsOperationResult>
+  skillsGetPluginDeleteInfo: (input: {
+    skillName: string
+    pluginName: string
+    marketplace: string
+  }) => Promise<{
+    pluginKey: string
+    pluginName: string
+    marketplace: string
+    version: string
+    skillNames: string[]
+    installPath: string
+  } | null>
+  skillsDeletePlugin: (input: {
+    pluginKey: string
+    pluginName: string
+    marketplace: string
+    installPath: string
+    skillNames: string[]
+  }) => Promise<SkillsOperationResult>
+  skillsUpdateSkill: (input: { skillName: string }) => Promise<SkillsOperationResult>
+  skillsUpdatePlugin: (input: {
+    pluginName: string
+    marketplace: string
+  }) => Promise<SkillsOperationResult>
+
+  // MCP 管理
+  mcpList: () => Promise<McpListResult>
+  mcpGetConfig: () => Promise<McpManagerConfig>
+  mcpSaveConfig: (patch: Partial<McpManagerConfig>) => Promise<McpOperationResult>
+  mcpSaveServer: (input: {
+    server: ManagedMcpServer
+    oldName?: string
+  }) => Promise<McpOperationResult>
+  mcpDeleteServer: (input: { name: string }) => Promise<McpOperationResult>
+  mcpImportFromAgents: (input: {
+    agents?: string[]
+    overwrite?: boolean
+  }) => Promise<McpOperationResult>
+  onMcpConfigChanged: (callback: () => void) => () => void
 
   // ============ Marketplace 市场管理 ============
 
@@ -989,9 +1611,19 @@ interface KiroApi {
   marketplaceGetInstalledSkills: (marketplace: MarketplaceInfo) => Promise<SkillsSkillView[]>
 
   // Skills Auto-Update Push Event Listeners
-  onSkillsUpdateStatusChanged: (callback: (event: { agent: string; skillName: string; status: string; reason?: string }) => void) => () => void
-  onSkillsBatchUpdateCompleted: (callback: (event: { successes: Array<{ agent: string; skillName: string; previousHash: string; newHash: string }>; failures: Array<{ agent: string; skillName: string; reason: string }>; timestamp: string }) => void) => () => void
-  onSkillsCheckProgress: (callback: (event: { agent: string; skillName: string; checking: boolean }) => void) => () => void
+  onSkillsUpdateStatusChanged: (
+    callback: (event: { agent: string; skillName: string; status: string; reason?: string }) => void
+  ) => () => void
+  onSkillsBatchUpdateCompleted: (
+    callback: (event: {
+      successes: Array<{ agent: string; skillName: string; previousHash: string; newHash: string }>
+      failures: Array<{ agent: string; skillName: string; reason: string }>
+      timestamp: string
+    }) => void
+  ) => () => void
+  onSkillsCheckProgress: (
+    callback: (event: { agent: string; skillName: string; checking: boolean }) => void
+  ) => () => void
 
   // 代理池验活
   proxyPoolValidate: (params: {
@@ -1026,7 +1658,11 @@ interface KiroApi {
   }>
 
   // 诊断：通用 HTTP 探测
-  diagnoseHttpProbe: (params: { url: string; method?: 'GET' | 'HEAD'; timeoutMs?: number }) => Promise<{
+  diagnoseHttpProbe: (params: {
+    url: string
+    method?: 'GET' | 'HEAD'
+    timeoutMs?: number
+  }) => Promise<{
     success: boolean
     latencyMs?: number
     status?: number
@@ -1034,21 +1670,49 @@ interface KiroApi {
   }>
 
   // 账号-代理绑定（反代分桶）
-  accountSetProxyBinding: (accountId: string, proxyUrl: string | undefined) => Promise<{ success: boolean }>
+  accountSetProxyBinding: (
+    accountId: string,
+    proxyUrl: string | undefined
+  ) => Promise<{ success: boolean }>
 
   // 一键诊断
   diagnoseRun: (params: {
     proxyUrl?: string
-    targets: Array<{ id: string; label: string; url: string; timeoutMs?: number; expectStatus?: number[] }>
-  }) => Promise<{ results: Array<{ id: string; label: string; url: string; success: boolean; httpStatus?: number; latencyMs?: number; error?: string }> }>
+    targets: Array<{
+      id: string
+      label: string
+      url: string
+      timeoutMs?: number
+      expectStatus?: number[]
+    }>
+  }) => Promise<{
+    results: Array<{
+      id: string
+      label: string
+      url: string
+      success: boolean
+      httpStatus?: number
+      latencyMs?: number
+      error?: string
+    }>
+  }>
 
   // 账号测活：指定账号 + 模型走反代逻辑发测试消息
   diagnoseAccountLiveness: (params: {
     account: {
-      id?: string; email?: string; accessToken?: string; refreshToken?: string
-      clientId?: string; clientSecret?: string; region?: string
-      authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'; provider?: string
-      profileArn?: string; machineId?: string; expiresAt?: number; proxyUrl?: string
+      id?: string
+      email?: string
+      accessToken?: string
+      refreshToken?: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'
+      provider?: string
+      profileArn?: string
+      machineId?: string
+      expiresAt?: number
+      proxyUrl?: string
     }
     model?: string
     message?: string
@@ -1064,36 +1728,54 @@ interface KiroApi {
 
   onRegistrationLog: (callback: (msg: string) => void) => () => void
 
-  onRegistrationStep: (callback: (data: {
-    taskId?: string
-    event: {
-      name:
-        | 'init' | 'proxy-chain-ready' | 'tls-ready' | 'exit-ip'
-        | 'oidc' | 'device' | 'email-created'
-        | 'portal' | 'workflow-init' | 'submit-email'
-        | 'signup' | 'send-otp' | 'waiting-otp' | 'otp-received'
-        | 'create-identity' | 'set-password' | 'sso-workflow' | 'sso-token'
-        | 'verify-alive' | 'done'
-      ts: number
-      email?: string
-      exitIp?: string
-      extra?: Record<string, unknown>
-    }
-  }) => void) => () => void
+  onRegistrationStep: (
+    callback: (data: {
+      taskId?: string
+      event: {
+        name:
+          | 'init'
+          | 'proxy-chain-ready'
+          | 'tls-ready'
+          | 'exit-ip'
+          | 'oidc'
+          | 'device'
+          | 'email-created'
+          | 'portal'
+          | 'workflow-init'
+          | 'submit-email'
+          | 'signup'
+          | 'send-otp'
+          | 'waiting-otp'
+          | 'otp-received'
+          | 'create-identity'
+          | 'set-password'
+          | 'sso-workflow'
+          | 'sso-token'
+          | 'verify-alive'
+          | 'done'
+        ts: number
+        email?: string
+        exitIp?: string
+        extra?: Record<string, unknown>
+      }
+    }) => void
+  ) => () => void
 
-  onRegistrationComplete: (callback: (result: {
-    status: 'success' | 'failed'
-    email: string
-    password?: string
-    error?: string
-    clientId?: string
-    clientSecret?: string
-    refreshToken?: string
-    accessToken?: string
-    region?: string
-    provider?: string
-    verify?: Record<string, unknown>
-  }) => void) => () => void
+  onRegistrationComplete: (
+    callback: (result: {
+      status: 'success' | 'failed'
+      email: string
+      password?: string
+      error?: string
+      clientId?: string
+      clientSecret?: string
+      refreshToken?: string
+      accessToken?: string
+      region?: string
+      provider?: string
+      verify?: Record<string, unknown>
+    }) => void
+  ) => () => void
 }
 
 declare global {
