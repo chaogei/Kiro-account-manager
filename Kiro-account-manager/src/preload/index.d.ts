@@ -911,7 +911,7 @@ interface KiroApi {
 
   protonOpenLogin: (proxy?: string) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
 
-  protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
+  protonLoginStatus: (proxy?: string, expectedEmail?: string) => Promise<{ loggedIn: boolean; currentEmail?: string; emailMatch?: boolean }>
 
   protonClose: () => Promise<{ success: boolean }>
 
