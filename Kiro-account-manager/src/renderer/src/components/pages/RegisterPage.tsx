@@ -2414,9 +2414,17 @@ export function RegisterPage(): React.JSX.Element {
                   onClick={async () => {
                     setProtonChecking(true)
                     try {
-                      const r = await window.api.protonLoginStatus()
+                      const r = await window.api.protonLoginStatus(undefined, protonBaseEmail.trim() || undefined)
                       setProtonLoggedIn(r.loggedIn)
-                      addLog(r.loggedIn ? (isEn ? '[Proton] Logged in' : '[Proton] 登录态有效') : (isEn ? '[Proton] Not logged in' : '[Proton] 未登录'))
+                      if (!r.loggedIn) {
+                        addLog(isEn ? '[Proton] Not logged in' : '[Proton] 未登录')
+                      } else if (r.emailMatch === false) {
+                        addLog(`[Proton] ${isEn ? 'Logged in as' : '已登录'} ${r.currentEmail || '???'}, ${isEn ? 'but does not match configured email' : '但与配置的母邮箱不匹配'}: ${protonBaseEmail}. ${isEn ? 'Please logout and re-login.' : '请退出后重新登录。'}`)
+                      } else if (r.currentEmail) {
+                        addLog(`[Proton] ${isEn ? 'Logged in as' : '已登录'} ${r.currentEmail}${r.emailMatch ? ` (${isEn ? 'email matches' : '邮箱一致'})` : ''}`)
+                      } else {
+                        addLog(`[Proton] ${isEn ? 'Logged in (could not read account email, please verify manually)' : '已登录（未能读取账户邮箱，请手动确认）'}`)
+                      }
                     } finally {
                       setProtonChecking(false)
                     }
@@ -2428,6 +2436,23 @@ export function RegisterPage(): React.JSX.Element {
                 <span className={cn('text-xs', protonLoggedIn ? 'text-green-500' : 'text-muted-foreground')}>
                   {protonLoggedIn ? (isEn ? '● Logged in' : '● 已登录') : (isEn ? '○ Not logged in' : '○ 未登录')}
                 </span>
+                <button
+                  type="button"
+                  disabled={protonChecking || !protonLoggedIn}
+                  onClick={async () => {
+                    setProtonChecking(true)
+                    try {
+                      await window.api.protonClose()
+                      setProtonLoggedIn(false)
+                      addLog(isEn ? '[Proton] Logged out, please re-login with the correct account' : '[Proton] 已退出，请重新登录正确的账户')
+                    } finally {
+                      setProtonChecking(false)
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-md border border-destructive/30 text-destructive text-sm transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                >
+                  {isEn ? 'Logout' : '退出登录'}
+                </button>
               </div>
               <p className="text-xs text-muted-foreground leading-snug">
                 {isEn
