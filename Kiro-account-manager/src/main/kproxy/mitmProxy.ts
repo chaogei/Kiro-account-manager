@@ -427,6 +427,10 @@ export class MitmProxy {
   ): void {
     const startTime = Date.now()
 
+    // 握手完成前到达的 body 分片要先缓存，否则会被丢弃导致上游收到不完整请求体。
+    let connected = false
+    const pending: Buffer[] = []
+
     // 连接到目标服务器
     const serverSocket = tls.connect({
       host: hostname,
@@ -434,22 +438,33 @@ export class MitmProxy {
       servername: hostname,
       rejectUnauthorized: true
     }, () => {
+      connected = true
       // 发送修改后的请求头
       serverSocket.write(headers + '\r\n\r\n')
-      
       // 发送已接收的请求体
       if (initialBody) {
         serverSocket.write(initialBody)
       }
-
-      // 如果还有更多数据，继续转发
-      if (bodyReceived < contentLength) {
-        clientSocket.on('data', (chunk: Buffer) => {
-          serverSocket.write(chunk)
-          bodyReceived += chunk.length
-        })
-      }
+      // 冲刷握手期间缓存的 body 分片
+      for (const chunk of pending) serverSocket.write(chunk)
+      pending.length = 0
     })
+
+    // 接管客户端后续 body 分片：连接好直接转发，否则先缓存（'data' 为异步事件，此时 serverSocket 已就绪）
+    const onClientBody = (chunk: Buffer): void => {
+      bodyReceived += chunk.length
+      if (connected) serverSocket.write(chunk)
+      else pending.push(chunk)
+    }
+    // 仅当还有未收齐的 body 时才需要继续接管后续分片
+    if (bodyReceived < contentLength) {
+      clientSocket.on('data', onClientBody)
+    }
+
+    let settled = false
+    const cleanup = (): void => {
+      clientSocket.removeListener('data', onClientBody)
+    }
 
     // 将响应转发回客户端
     serverSocket.on('data', (chunk: Buffer) => {
@@ -457,6 +472,9 @@ export class MitmProxy {
     })
 
     serverSocket.on('end', () => {
+      if (settled) return
+      settled = true
+      cleanup()
       const duration = Date.now() - startTime
       this.events.onResponse?.({
         timestamp: Date.now(),
@@ -468,6 +486,9 @@ export class MitmProxy {
     })
 
     serverSocket.on('error', (error) => {
+      if (settled) return
+      settled = true
+      cleanup()
       console.error(`[MitmProxy] Server connection error to ${hostname}:`, error.message)
       clientSocket.end()
     })
@@ -477,7 +498,8 @@ export class MitmProxy {
     })
 
     clientSocket.on('error', () => {
-      serverSocket.end()
+      cleanup()
+      serverSocket.destroy()
     })
   }
 

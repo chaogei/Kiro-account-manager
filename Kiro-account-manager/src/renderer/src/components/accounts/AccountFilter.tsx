@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { Button } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -49,13 +50,41 @@ function toRgba(argbColor: string): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha / 255})`
 }
 
+// 域名筛选默认展示的最大数量，超出部分折叠
+const DOMAIN_DISPLAY_LIMIT = 16
+
 export function AccountFilterPanel(): React.ReactNode {
-  const { filter, setFilter, clearFilter, tags, getStats } = useAccountsStore()
+  const { filter, setFilter, clearFilter, tags, accounts, getStats } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const StatusOptions = isEn ? StatusOptionsEn : StatusOptionsZh
+  const [showAllDomains, setShowAllDomains] = useState(false)
 
   const stats = getStats()
+
+  // 从现有账号中提取邮箱域名后缀及数量，按数量降序
+  const domainCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const account of accounts.values()) {
+      const atIndex = account.email.lastIndexOf('@')
+      if (atIndex < 0) continue
+      const domain = account.email.slice(atIndex + 1).toLowerCase()
+      if (!domain) continue
+      counts.set(domain, (counts.get(domain) ?? 0) + 1)
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }, [accounts])
+
+  // 折叠时也要保证已选中的域名可见
+  const visibleDomains = useMemo(() => {
+    if (showAllDomains || domainCounts.length <= DOMAIN_DISPLAY_LIMIT) return domainCounts
+    const top = domainCounts.slice(0, DOMAIN_DISPLAY_LIMIT)
+    const selected = new Set(filter.emailDomains ?? [])
+    for (const entry of domainCounts.slice(DOMAIN_DISPLAY_LIMIT)) {
+      if (selected.has(entry[0])) top.push(entry)
+    }
+    return top
+  }, [domainCounts, showAllDomains, filter.emailDomains])
 
   const hasActiveFilters = Boolean(
     filter.subscriptionTypes?.length ||
@@ -63,6 +92,7 @@ export function AccountFilterPanel(): React.ReactNode {
     filter.idps?.length ||
     filter.groupIds?.length ||
     filter.tagIds?.length ||
+    filter.emailDomains?.length ||
     filter.usageMin !== undefined ||
     filter.usageMax !== undefined ||
     filter.daysRemainingMin !== undefined ||
@@ -304,6 +334,42 @@ export function AccountFilterPanel(): React.ReactNode {
               <span className="text-xs text-muted-foreground">{isEn ? 'd' : '天'}</span>
             </div>
           </div>
+
+          {/* 第三行：邮箱域名后缀 */}
+          {domainCounts.length > 0 && (
+            <div className="flex items-start gap-2 mt-2">
+              <span className="text-xs text-muted-foreground shrink-0 mt-0.5">{isEn ? 'Domain:' : '域名:'}</span>
+              <div className="flex flex-wrap gap-1">
+                {visibleDomains.map(([domain, count]) => {
+                  const isActive = filter.emailDomains?.includes(domain)
+                  return (
+                    <button
+                      key={domain}
+                      className={cn(
+                        'px-2 py-0.5 text-xs rounded border transition-colors',
+                        isActive
+                          ? 'bg-primary text-primary-foreground border-primary'
+                          : 'hover:bg-muted'
+                      )}
+                      onClick={() => toggleArrayFilter('emailDomains', domain)}
+                    >
+                      @{domain}({count})
+                    </button>
+                  )
+                })}
+                {domainCounts.length > DOMAIN_DISPLAY_LIMIT && (
+                  <button
+                    className="px-2 py-0.5 text-xs rounded border hover:bg-muted text-muted-foreground transition-colors"
+                    onClick={() => setShowAllDomains(!showAllDomains)}
+                  >
+                    {showAllDomains
+                      ? (isEn ? 'Less' : '收起')
+                      : `+${domainCounts.length - DOMAIN_DISPLAY_LIMIT}`}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
     </div>
   )
 }

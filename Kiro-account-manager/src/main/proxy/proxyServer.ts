@@ -263,7 +263,7 @@ export class ProxyServer {
   private stats: ProxyStats
   private sessionStats: { totalRequests: number; successRequests: number; failedRequests: number; startTime: number }
   private events: ProxyServerEvents
-  private refreshingTokens: Set<string> = new Set() // 防止并发刷新
+  private refreshingTokens: Map<string, Promise<boolean>> = new Map() // 在途刷新去重（并发方共享同一结果）
   private isHttps: boolean = false
   private isStopping: boolean = false
   private activeRequests: Set<AbortController> = new Set()
@@ -943,6 +943,27 @@ export class ProxyServer {
     return res.writableEnded || res.destroyed
   }
 
+  /**
+   * SSE 背压：res.write 缓冲打满（writableNeedDrain）时返回等待 drain 的 promise，
+   * 上游流解析 await 它暂停拉取，避免慢客户端导致内存无限堆积。
+   * 同时监听 close/error，客户端断开时立刻放行（防止 promise 永久挂起）。
+   * 缓冲未满时返回 undefined（零开销快路径）。
+   */
+  private waitForDrain(res: http.ServerResponse): Promise<void> | undefined {
+    if (!res.writableNeedDrain || res.destroyed || res.writableEnded) return undefined
+    return new Promise<void>((resolve) => {
+      const done = (): void => {
+        res.off('drain', done)
+        res.off('close', done)
+        res.off('error', done)
+        resolve()
+      }
+      res.once('drain', done)
+      res.once('close', done)
+      res.once('error', done)
+    })
+  }
+
   // 检测错误消息中是否包含账号被长期封禁的特征
   // 返回 { reason, message } 表示需要标记 suspended；返回 null 表示非封禁错误
   // 覆盖：
@@ -1111,15 +1132,31 @@ export class ProxyServer {
       return false
     }
 
-    // 防止并发刷新
-    if (this.refreshingTokens.has(account.id)) {
-      console.log(`[ProxyServer] Token refresh already in progress for ${account.email || account.id}`)
-      // 等待刷新完成
-      await this.waitForRetry(1000, signal)
-      return !this.isTokenExpiringSoon(this.accountPool.getAccount(account.id) || account)
+    // 并发去重：等待在途刷新并复用其真实结果。
+    // 旧实现固定等 1 秒后按过期时间"猜"结果，慢刷新（网络抖动/慢代理）会被误判失败导致多余切号。
+    const existing = this.refreshingTokens.get(account.id)
+    if (existing) {
+      console.log(`[ProxyServer] Token refresh already in progress for ${account.email || account.id}, awaiting result`)
+      try {
+        return await this.abortable(existing, signal)
+      } catch {
+        // 只有"本请求自己"被中止才向上抛；在途刷新因发起方中止/失败时，对本请求按刷新失败处理
+        if (signal?.aborted) throw this.getAbortError(signal)
+        return false
+      }
     }
 
-    this.refreshingTokens.add(account.id)
+    const task = this.doRefreshToken(account, signal)
+    this.refreshingTokens.set(account.id, task)
+    try {
+      return await task
+    } finally {
+      this.refreshingTokens.delete(account.id)
+    }
+  }
+
+  /** 实际执行 Token 刷新（由 refreshToken 包裹在途去重后调用） */
+  private async doRefreshToken(account: ProxyAccount, signal?: AbortSignal): Promise<boolean> {
     console.log(`[ProxyServer] Refreshing token for ${account.email || account.id}`)
 
     try {
@@ -1127,7 +1164,7 @@ export class ProxyServer {
       const jitter = Math.floor(Math.random() * 3000)
       if (jitter > 0) await this.waitForRetry(jitter, signal)
       
-      const result = await this.abortable(this.events.onTokenRefresh(account), signal)
+      const result = await this.abortable(this.events.onTokenRefresh!(account), signal)
       if (result.success && result.accessToken) {
         // 更新账号池中的 Token
         this.accountPool.updateAccount(account.id, {
@@ -1154,8 +1191,6 @@ export class ProxyServer {
       console.error(`[ProxyServer] Token refresh error for ${account.email || account.id}:`, error)
       this.accountPool.markNeedsRefresh(account.id)
       return false
-    } finally {
-      this.refreshingTokens.delete(account.id)
     }
   }
 
@@ -2224,6 +2259,7 @@ export class ProxyServer {
                 const chunk = { candidates: [{ content: { parts: [{ text }], role: 'model' }, finishReason: null }] }
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`)
               }
+              return this.waitForDrain(res)
             },
             (usage) => {
               if (signal?.aborted || this.isResponseClosed(res)) {
@@ -2783,6 +2819,7 @@ export class ProxyServer {
             })
             res.write(`data: ${JSON.stringify(toolChunk)}\n\n`)
           }
+          return this.waitForDrain(res)
         },
         async (usage) => {
           if (signal?.aborted || this.isResponseClosed(res)) {
@@ -3099,7 +3136,7 @@ export class ProxyServer {
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
-            return
+            return this.waitForDrain(res)
           }
           if (text && text.trim()) {
             if (isThinking) {
@@ -3196,6 +3233,7 @@ export class ProxyServer {
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(toolBlockStop)}\n\n`)
             currentBlockIndex++
           }
+          return this.waitForDrain(res)
         },
         async (usage) => {
           if (signal?.aborted || this.isResponseClosed(res)) {

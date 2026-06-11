@@ -181,8 +181,8 @@ function injectProxySession(url: string): string {
   return url
 }
 
-type RegMode = 'manual' | 'outlook' | 'tempmail' | 'proton' | 'mixed'
-type AutoEmailSource = 'outlook' | 'tempmail' | 'proton'
+type RegMode = 'manual' | 'outlook' | 'tempmail' | 'proton' | 'gptmail' | 'mixed'
+type AutoEmailSource = 'outlook' | 'tempmail' | 'proton' | 'gptmail'
 /**
  * Phase 状态机：
  * - idle：未开始
@@ -620,6 +620,13 @@ interface RegisterConfig {
   tempMailDomain: string
   /** Proton 母邮箱（点号别名母号，如 evanbartellchae@protonmail.com）*/
   protonBaseEmail: string
+  /** GPTmail (mail.chatgpt.org.uk) — 支持两种模式：私有域名直收（inbox 留空）或 CF 转发（填 inbox）；
+   *   私有域名设了密码时填 privatePassword */
+  gptMailBaseURL: string
+  gptMailInboxEmail: string
+  gptMailDomain: string
+  gptMailPrefix: string
+  gptMailPrivatePassword: string
   /** 手动模式 — 母邮箱（收验证码的真实邮箱）*/
   manualParentEmail: string
   /** 手动模式 — 启用匿名邮箱（点号变体）*/
@@ -676,6 +683,15 @@ export function RegisterPage(): React.JSX.Element {
   const [protonLoggedIn, _setProtonLoggedIn] = useState(_protonLoggedIn)
   const setProtonLoggedIn = useCallback((v: boolean): void => { _protonLoggedIn = v; _setProtonLoggedIn(v) }, [])
   const [protonChecking, setProtonChecking] = useState(false)
+
+  // GPTmail (mail.chatgpt.org.uk) 配置 —— 同时支持两种模式：
+  //   A. 私有域名直收：MX 解析到 GPTmail；inboxEmail 留空；私有域名设了密码就填 privatePassword
+  //   B. CF Email Routing 转发：inboxEmail 填固定 GPTmail 邮箱
+  const [gptMailBaseURL, setGptMailBaseURL] = useState(saved.gptMailBaseURL || '')
+  const [gptMailInboxEmail, setGptMailInboxEmail] = useState(saved.gptMailInboxEmail || '')
+  const [gptMailDomain, setGptMailDomain] = useState(saved.gptMailDomain || '')
+  const [gptMailPrefix, setGptMailPrefix] = useState(saved.gptMailPrefix || '')
+  const [gptMailPrivatePassword, setGptMailPrivatePassword] = useState(saved.gptMailPrivatePassword || '')
 
   const logContainerRef = useRef<HTMLDivElement>(null)
   const { addAccount, accounts } = useAccountsStore()
@@ -892,7 +908,7 @@ export function RegisterPage(): React.JSX.Element {
     _logs = []; setLogs([])
     setResult(null)
     setImported(false)
-    const modeLabel = mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : 'Outlook'
+    const modeLabel = mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : mode === 'gptmail' ? 'GPTmail' : 'Outlook'
     addLog(t('register.logAutoStart').replace('{mode}', modeLabel))
 
     const config: Record<string, unknown> = {}
@@ -914,6 +930,18 @@ export function RegisterPage(): React.JSX.Element {
       config.useProton = true
       config.protonEmail = variant
       addLog(`[Proton] ${isEn ? 'Using dot-variant' : '使用点号变体'}: ${variant}`)
+    } else if (mode === 'gptmail') {
+      if (!gptMailDomain.trim()) {
+        addLog(isEn ? '[GPTmail] Domain not configured' : '[GPTmail] 未配置域名')
+        setPhase('idle')
+        return
+      }
+      config.useGptMail = true
+      config.gptMailBaseURL = gptMailBaseURL.trim()
+      config.gptMailInboxEmail = gptMailInboxEmail.trim()  // 留空 → 私有域名直收；填了 → CF 转发
+      config.gptMailDomain = gptMailDomain
+      config.gptMailPrefix = gptMailPrefix.trim()
+      config.gptMailPrivatePassword = gptMailPrivatePassword  // 私有域名设了密码才填
     }
 
     // 代理池注入
@@ -1095,7 +1123,7 @@ export function RegisterPage(): React.JSX.Element {
       const raw = localStorage.getItem('kiro-register-mixed-sources')
       if (raw) {
         const arr = JSON.parse(raw) as string[]
-        mixed = arr.filter((x): x is AutoEmailSource => x === 'outlook' || x === 'tempmail' || x === 'proton')
+        mixed = arr.filter((x): x is AutoEmailSource => x === 'outlook' || x === 'tempmail' || x === 'proton' || x === 'gptmail')
         if (mixed.length === 0) mixed = ['outlook', 'tempmail']
       }
     } catch { /* ignore */ }
@@ -1114,11 +1142,16 @@ export function RegisterPage(): React.JSX.Element {
       tempMailEpin,
       tempMailDomain,
       protonBaseEmail,
+      gptMailBaseURL,
+      gptMailInboxEmail,
+      gptMailDomain,
+      gptMailPrefix,
+      gptMailPrivatePassword,
       manualParentEmail: parentEmail,
       manualAnonymousEmail: anonymousEmail,
       mixedEnabledSources: mixed
     }
-  }, [mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, parentEmail, anonymousEmail])
+  }, [mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, gptMailBaseURL, gptMailInboxEmail, gptMailDomain, gptMailPrefix, gptMailPrivatePassword, parentEmail, anonymousEmail])
 
   const applyTemplate = useCallback((tpl: RegisterTemplate) => {
     const c = tpl.config
@@ -1137,6 +1170,11 @@ export function RegisterPage(): React.JSX.Element {
     setTempMailEpin(c.tempMailEpin || '')
     setTempMailDomain(c.tempMailDomain || '')
     setProtonBaseEmail(c.protonBaseEmail || '')
+    setGptMailBaseURL(c.gptMailBaseURL || '')
+    setGptMailInboxEmail(c.gptMailInboxEmail || '')
+    setGptMailDomain(c.gptMailDomain || '')
+    setGptMailPrefix(c.gptMailPrefix || '')
+    setGptMailPrivatePassword(c.gptMailPrivatePassword || '')
     setParentEmail(c.manualParentEmail || '')
     setAnonymousEmail(c.manualAnonymousEmail ?? false)
     if (c.mixedEnabledSources) setMixedEnabledSources(c.mixedEnabledSources)
@@ -1310,8 +1348,8 @@ export function RegisterPage(): React.JSX.Element {
 
   // 自动保存配置到 localStorage
   useEffect(() => {
-    saveConfig({ mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, manualParentEmail: parentEmail, manualAnonymousEmail: anonymousEmail })
-  }, [mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, parentEmail, anonymousEmail])
+    saveConfig({ mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, gptMailBaseURL, gptMailInboxEmail, gptMailDomain, gptMailPrefix, gptMailPrivatePassword, manualParentEmail: parentEmail, manualAnonymousEmail: anonymousEmail })
+  }, [mode, outlookData, fullName, batchCount, batchInterval, batchAutoImport, batchRetries, batchConcurrency, autoFetchProLink, proPlanType, tempMailEmail, tempMailEpin, tempMailDomain, protonBaseEmail, gptMailBaseURL, gptMailInboxEmail, gptMailDomain, gptMailPrefix, gptMailPrivatePassword, parentEmail, anonymousEmail])
 
   // 匿名邮箱预览计算 — 以 anonymousEmail/parentEmail/accounts 为依赖实时冷算下一个变体
   const anonymousPreview = useMemo(() => {
@@ -1564,7 +1602,7 @@ export function RegisterPage(): React.JSX.Element {
       if (raw) {
         // 兼容老数据：过滤掉已废弃的 moemail
         const arr = JSON.parse(raw) as string[]
-        const valid = arr.filter((x): x is AutoEmailSource => x === 'outlook' || x === 'tempmail' || x === 'proton')
+        const valid = arr.filter((x): x is AutoEmailSource => x === 'outlook' || x === 'tempmail' || x === 'proton' || x === 'gptmail')
         return valid.length > 0 ? valid : ['outlook', 'tempmail']
       }
     } catch { /* ignore */ }
@@ -1576,10 +1614,10 @@ export function RegisterPage(): React.JSX.Element {
       const raw = localStorage.getItem('kiro-register-mixed-weights')
       if (raw) {
         const parsed = JSON.parse(raw) as Record<string, number>
-        return { outlook: parsed.outlook ?? 1, tempmail: parsed.tempmail ?? 1, proton: parsed.proton ?? 1 }
+        return { outlook: parsed.outlook ?? 1, tempmail: parsed.tempmail ?? 1, proton: parsed.proton ?? 1, gptmail: parsed.gptmail ?? 1 }
       }
     } catch { /* ignore */ }
-    return { outlook: 1, tempmail: 1, proton: 1 }
+    return { outlook: 1, tempmail: 1, proton: 1, gptmail: 1 }
   })
   useEffect(() => {
     try { localStorage.setItem('kiro-register-mixed-sources', JSON.stringify(mixedEnabledSources)) } catch { /* ignore */ }
@@ -1590,7 +1628,7 @@ export function RegisterPage(): React.JSX.Element {
 
   // 加权轮询调度：维护各源的"信用"分数，每次选信用最高的，扣除后累积
   // 这是 Smooth Weighted Round-Robin 算法（nginx 用的同款）
-  const mixedCredits = useRef<Record<AutoEmailSource, number>>({ outlook: 0, tempmail: 0, proton: 0 })
+  const mixedCredits = useRef<Record<AutoEmailSource, number>>({ outlook: 0, tempmail: 0, proton: 0, gptmail: 0 })
 
   /** 在混合模式下按加权轮询挑选下一个有效子源 */
   const pickNextSource = useCallback((): AutoEmailSource | null => {
@@ -1599,6 +1637,8 @@ export function RegisterPage(): React.JSX.Element {
       if (src === 'outlook') return !!outlookData.trim()
       if (src === 'tempmail') return !!(tempMailDomain.trim() && tempMailEmail.trim() && tempMailEpin.trim())
       if (src === 'proton') return !!protonBaseEmail.trim()
+      // GPTmail：只要有域名就 OK（inboxEmail 留空 = 私有直收模式）
+      if (src === 'gptmail') return !!gptMailDomain.trim()
       return false
     })
     if (candidates.length === 0) return null
@@ -1623,7 +1663,7 @@ export function RegisterPage(): React.JSX.Element {
       mixedCredits.current[best] -= totalWeight
     }
     return best
-  }, [mixedEnabledSources, mixedWeights, outlookData, tempMailDomain, tempMailEmail, tempMailEpin, protonBaseEmail])
+  }, [mixedEnabledSources, mixedWeights, outlookData, tempMailDomain, tempMailEmail, tempMailEpin, protonBaseEmail, gptMailDomain, gptMailInboxEmail])
 
   // 构建自动模式配置
   const buildAutoConfig = useCallback((): Parameters<typeof window.api.registrationStartAuto>[0] => {
@@ -1646,9 +1686,16 @@ export function RegisterPage(): React.JSX.Element {
       config.useProton = true
       const variant = generateProtonEmail()
       if (variant) config.protonEmail = variant
+    } else if (effectiveMode === 'gptmail') {
+      config.useGptMail = true
+      config.gptMailBaseURL = gptMailBaseURL.trim()
+      config.gptMailInboxEmail = gptMailInboxEmail.trim()
+      config.gptMailDomain = gptMailDomain
+      config.gptMailPrefix = gptMailPrefix.trim()
+      config.gptMailPrivatePassword = gptMailPrivatePassword
     }
     return config as Parameters<typeof window.api.registrationStartAuto>[0]
-  }, [mode, pickNextSource, outlookData, tempMailEmail, tempMailEpin, tempMailDomain, generateProtonEmail])
+  }, [mode, pickNextSource, outlookData, tempMailEmail, tempMailEpin, tempMailDomain, generateProtonEmail, gptMailBaseURL, gptMailInboxEmail, gptMailDomain, gptMailPrefix, gptMailPrivatePassword])
 
   // 代理池：注册时为每个任务自动挑选一个出口代理（启用后生效）
   const { proxyPool, proxyPoolConfig, pickNextProxy, reportProxyResult } = useAccountsStore()
@@ -1925,7 +1972,7 @@ export function RegisterPage(): React.JSX.Element {
     const taskCenterId = taskCenter.createTask({
       kind: 'register-batch',
       title: retryItems ? `重试 ${totalCount} 个失败任务` : `批量注册 ${totalCount} 个账号`,
-      subtitle: `${mode === 'outlook' ? 'Outlook' : mode === 'tempmail' ? 'TempMail.Plus' : mode === 'mixed' ? 'Mixed' : 'Manual'}，并发 ${concurrency}${proxyPoolConfig.enabled ? ' + 代理池' : ''}${rateLimitEnabled ? ` + ${maxPerMinute}/分钟` : ''}`,
+      subtitle: `${mode === 'outlook' ? 'Outlook' : mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : mode === 'gptmail' ? 'GPTmail' : mode === 'mixed' ? 'Mixed' : 'Manual'}，并发 ${concurrency}${proxyPoolConfig.enabled ? ' + 代理池' : ''}${rateLimitEnabled ? ` + ${maxPerMinute}/分钟` : ''}`,
       total: totalCount,
       onPause: () => {
         batchPause.current = true
@@ -2024,7 +2071,7 @@ export function RegisterPage(): React.JSX.Element {
       message: `共 ${totalCount} 个任务，成功 ${_batchSuccess}，失败 ${_batchFail}`,
       level: _batchFail === 0 ? 'success' : (_batchSuccess === 0 ? 'error' : 'warn'),
       fields: {
-        模式: mode === 'outlook' ? 'Outlook' : mode === 'tempmail' ? 'TempMail.Plus' : mode === 'mixed' ? 'Mixed' : 'Manual',
+        模式: mode === 'outlook' ? 'Outlook' : mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : mode === 'gptmail' ? 'GPTmail' : mode === 'mixed' ? 'Mixed' : 'Manual',
         并发: concurrency,
         成功: _batchSuccess,
         失败: _batchFail,
@@ -2155,6 +2202,7 @@ export function RegisterPage(): React.JSX.Element {
               ['outlook', 'Outlook'],
               ['tempmail', t('register.tempmail')],
               ['proton', 'Proton'],
+              ['gptmail', 'GPTmail'],
               ['mixed', isEn ? 'Mixed' : '混合']
             ] as [RegMode, string][]).map(([m, label]) => (
               <button
@@ -2254,11 +2302,12 @@ export function RegisterPage(): React.JSX.Element {
             <div className="p-4 bg-muted/30 rounded-lg border border-dashed space-y-3">
               <Label>{isEn ? 'Enabled email sources (Weighted Round-Robin)' : '启用的邮箱源（加权轮询）'}</Label>
               <div className="space-y-2">
-                {(['outlook', 'tempmail', 'proton'] as AutoEmailSource[]).map((src) => {
+                {(['outlook', 'tempmail', 'proton', 'gptmail'] as AutoEmailSource[]).map((src) => {
                   const enabled = mixedEnabledSources.includes(src)
-                  const label = src === 'outlook' ? 'Outlook' : src === 'tempmail' ? 'TempMail.Plus' : 'Proton'
+                  const label = src === 'outlook' ? 'Outlook' : src === 'tempmail' ? 'TempMail.Plus' : src === 'proton' ? 'Proton' : 'GPTmail'
                   const configured = src === 'outlook' ? !!outlookData.trim()
                     : src === 'proton' ? !!protonBaseEmail.trim()
+                    : src === 'gptmail' ? !!gptMailDomain.trim()
                     : !!(tempMailDomain.trim() && tempMailEmail.trim() && tempMailEpin.trim())
                   return (
                     <div key={src} className="flex items-center gap-2">
@@ -2436,6 +2485,132 @@ export function RegisterPage(): React.JSX.Element {
               </p>
             </div>
           )}
+
+          {/* GPTmail 配置（独立模式 或 混合模式启用了 gptmail 时显示）
+              支持两种模式：
+                A. 私有域名直收（接收邮箱留空）—— MX 直接解析到 GPTmail，无需 CF
+                B. CF 转发（填接收邮箱）—— 跟 TempMail.Plus 玩法一致 */}
+          {(mode === 'gptmail' || (mode === 'mixed' && mixedEnabledSources.includes('gptmail'))) && (() => {
+            const isPrivateMode = !gptMailInboxEmail.trim()
+            return (
+            <div className="p-4 bg-muted/30 rounded-lg border border-dashed space-y-4">
+              {/* 模式状态标签 */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">{isEn ? 'Current mode:' : '当前模式：'}</span>
+                <span className={cn(
+                  'px-2 py-0.5 rounded-full font-medium',
+                  isPrivateMode ? 'bg-primary/10 text-primary' : 'bg-amber-500/10 text-amber-600'
+                )}>
+                  {isPrivateMode
+                    ? (isEn ? 'A · Private direct (MX → GPTmail)' : 'A · 私有域名直收（MX → GPTmail）')
+                    : (isEn ? 'B · CF Email Routing forward' : 'B · CF Email Routing 转发')}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>{isEn ? 'Your domain pool' : '自建域名池'} <span className="text-destructive">*</span></Label>
+                  <Input
+                    value={gptMailDomain}
+                    onChange={(e) => setGptMailDomain(e.target.value)}
+                    placeholder="example.com  domain2.com"
+                    disabled={isRunning || batchRunning}
+                    className="font-mono text-xs"
+                  />
+                  {gptMailDomain.trim() && (() => {
+                    const list = gptMailDomain.split(/[\s,;]+/).filter(Boolean)
+                    return list.length > 1
+                      ? <p className="text-[11px] text-muted-foreground">{isEn ? `Domain pool: ${list.length}, randomized per account` : `域名池 ${list.length} 个，每个账号随机挑一个（降低关联）`}</p>
+                      : <p className="text-[11px] text-muted-foreground">{isEn ? 'Multiple domains (space/comma separated) enable rotation' : '填多个域名（空格/逗号分隔）可启用域名轮换'}</p>
+                  })()}
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label>{isEn ? 'GPTmail inbox (optional, for CF forwarding)' : 'GPTmail 接收邮箱（可选，CF 转发用）'}</Label>
+                  <Input
+                    type="email"
+                    value={gptMailInboxEmail}
+                    onChange={(e) => setGptMailInboxEmail(e.target.value)}
+                    placeholder={isEn ? 'leave empty for private direct' : '留空 = 私有域名直收'}
+                    disabled={isRunning || batchRunning}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    {isEn
+                      ? 'Empty: register prefix@yourdomain directly as the inbox (MX must point to GPTmail). Filled: CF Email Routing forwards *@yourdomain to this inbox.'
+                      : '留空：prefix@yourdomain 本身就是 inbox（域名 MX 必须解析到 GPTmail）。填了：CF Email Routing 把 *@yourdomain 转发到此邮箱。'}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label>{isEn ? 'Private domain password (optional)' : '私有域名密码（可选）'}</Label>
+                  <Input
+                    type="password"
+                    value={gptMailPrivatePassword}
+                    onChange={(e) => setGptMailPrivatePassword(e.target.value)}
+                    placeholder={isEn ? 'only for private domains with password' : '仅在 GPTmail 设了私密密码时填'}
+                    disabled={isRunning || batchRunning}
+                    autoComplete="off"
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    {isEn
+                      ? 'If you added your domain as "Private" on GPTmail, fill the password here. Auto-unlocks the inbox before polling.'
+                      : '如果你在 GPTmail 把域名添加为"私密域名"并设了密码，填这里。轮询前会自动解锁 inbox。'}
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>{isEn ? 'Fixed prefix (optional)' : '固定前缀（可选）'}</Label>
+                  <Input
+                    value={gptMailPrefix}
+                    onChange={(e) => setGptMailPrefix(e.target.value)}
+                    placeholder={isEn ? 'leave empty for random' : '留空则自动生成随机前缀'}
+                    disabled={isRunning || batchRunning}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5 md:col-span-2">
+                  <Label>{isEn ? 'Custom Base URL (optional)' : '自定义 BaseURL（可选）'}</Label>
+                  <Input
+                    value={gptMailBaseURL}
+                    onChange={(e) => setGptMailBaseURL(e.target.value)}
+                    placeholder="https://mail.chatgpt.org.uk"
+                    disabled={isRunning || batchRunning}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground">{isEn ? 'Defaults to https://mail.chatgpt.org.uk; change for self-hosted' : '默认 https://mail.chatgpt.org.uk，私有部署可改'}</p>
+                </div>
+              </div>
+
+              {/* 模式说明 */}
+              <div className="p-2.5 bg-background/60 rounded border-l-2 border-primary/60 text-xs leading-relaxed text-muted-foreground space-y-1">
+                {isPrivateMode ? (
+                  <>
+                    <p className="font-medium text-foreground">{isEn ? 'Mode A · Private direct (recommended):' : '模式 A · 私有域名直收（推荐）：'}</p>
+                    <ol className="list-decimal pl-5 space-y-0.5">
+                      <li>{isEn ? 'Add your domain on mail.chatgpt.org.uk (it gives you MX records)' : '在 mail.chatgpt.org.uk 添加私有/公开域名（页面会给出 MX 解析记录）'}</li>
+                      <li>{isEn ? 'Point your domain MX to GPTmail at your DNS provider' : '在 DNS 提供商把你的域名 MX 指向 GPTmail'}</li>
+                      <li>{isEn ? 'Each registration uses prefix@yourdomain as both register email and inbox' : '每次注册用 prefix@你的域名 作为注册邮箱（同时也是 inbox）'}</li>
+                      <li>{isEn ? 'GPTmail receives directly, we poll the API and extract the code' : 'GPTmail 直接收信 → 我们轮询 API 提取验证码'}</li>
+                    </ol>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium text-foreground">{isEn ? 'Mode B · Cloudflare Email Routing forward:' : '模式 B · Cloudflare Email Routing 转发：'}</p>
+                    <ol className="list-decimal pl-5 space-y-0.5">
+                      <li>{isEn ? 'Register a receiving inbox on mail.chatgpt.org.uk (e.g. abc@msn-mail-free-9224.dynv6.net)' : '在 mail.chatgpt.org.uk 注册一个接收邮箱（如 abc@msn-mail-free-9224.dynv6.net）'}</li>
+                      <li>{isEn ? 'In Cloudflare Email Routing, set catch-all *@yourdomain → that inbox' : '在 Cloudflare Email Routing 把 *@你的域名 catch-all 转发到该邮箱'}</li>
+                      <li>{isEn ? 'Each registration uses prefix@yourdomain' : '每次注册用 prefix@你的域名'}</li>
+                      <li>{isEn ? 'AWS sends OTP → CF forwards to GPTmail → we poll GPTmail API and extract the code' : 'AWS 发送验证码 → CF 转发到 GPTmail → 我们轮询 GPTmail API 提取验证码'}</li>
+                    </ol>
+                  </>
+                )}
+              </div>
+            </div>
+            )
+          })()}
         </CardContent>
       </Card>
 
@@ -2640,7 +2815,10 @@ export function RegisterPage(): React.JSX.Element {
                 onClick={mode === 'manual' ? startManual : startAuto}
                 disabled={
                   (mode === 'outlook' && !outlookData.trim()) ||
-                  (mode === 'tempmail' && (!tempMailDomain.trim() || !tempMailEmail.trim() || !tempMailEpin.trim()))
+                  (mode === 'tempmail' && (!tempMailDomain.trim() || !tempMailEmail.trim() || !tempMailEpin.trim())) ||
+                  (mode === 'gptmail' && !gptMailDomain.trim()) ||
+                  (mode === 'proton' && !protonBaseEmail.trim()) ||
+                  (mode === 'mixed' && pickNextSource() == null)
                 }
               >
                 <Play className="h-4 w-4 mr-2" />
@@ -2858,6 +3036,8 @@ export function RegisterPage(): React.JSX.Element {
                   (!batchRunning && isRunning) ||
                   (mode === 'outlook' && !outlookData.trim()) ||
                   (mode === 'tempmail' && (!tempMailDomain.trim() || !tempMailEmail.trim() || !tempMailEpin.trim())) ||
+                  (mode === 'gptmail' && !gptMailDomain.trim()) ||
+                  (mode === 'proton' && !protonBaseEmail.trim()) ||
                   (mode === 'mixed' && pickNextSource() == null)
                 }
               >

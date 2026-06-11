@@ -297,7 +297,32 @@ export class PromptCacheTracker {
   }
 
   private canonicalize(obj: unknown): string {
-    return JSON.stringify(obj, Object.keys(obj as object).sort())
+    return PromptCacheTracker.stableStringify(obj)
+  }
+
+  /**
+   * 深度稳定序列化：所有层级的对象键按字典序排序。
+   * 不能用 `JSON.stringify(obj, Object.keys(obj).sort())` —— 数组 replacer 是
+   * 作用于**所有层级**的键白名单，嵌套对象（消息 block、tool input_schema 等）的键
+   * 不在顶层键列表里会被整体丢弃，导致指纹只反映结构不反映内容，
+   * 不同内容的请求会误判为缓存命中。
+   */
+  private static stableStringify(value: unknown): string {
+    const json = (v: unknown): string | undefined => {
+      if (v === null) return 'null'
+      const t = typeof v
+      if (t === 'string' || t === 'number' || t === 'boolean') return JSON.stringify(v)
+      if (t !== 'object') return undefined // undefined/function/symbol 与 JSON.stringify 行为一致
+      if (Array.isArray(v)) return `[${v.map((item) => json(item) ?? 'null').join(',')}]`
+      const obj = v as Record<string, unknown>
+      const parts: string[] = []
+      for (const k of Object.keys(obj).sort()) {
+        const sv = json(obj[k])
+        if (sv !== undefined) parts.push(`${JSON.stringify(k)}:${sv}`)
+      }
+      return `{${parts.join(',')}}`
+    }
+    return json(value) ?? 'null'
   }
 
   private hashChunk(hasher: ReturnType<typeof createHash>, chunk: string): void {

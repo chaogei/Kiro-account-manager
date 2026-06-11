@@ -153,6 +153,7 @@ export interface AccountFilter {
   idps?: IdpType[]
   groupIds?: string[]
   tagIds?: string[]
+  emailDomains?: string[] // 邮箱域名后缀（@ 之后的部分，小写）
   usageMin?: number // 使用量百分比
   usageMax?: number
   daysRemainingMin?: number

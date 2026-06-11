@@ -3,7 +3,7 @@
  * 支持 Windows、macOS、Linux 三大平台
  */
 
-import { exec, execSync } from 'child_process'
+import { exec, execSync, spawn } from 'child_process'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -231,15 +231,23 @@ export async function requestAdminRestart(): Promise<boolean> {
         // Windows: 多路径探测 PowerShell，使用 Start-Process -Verb RunAs 提权
         const psPath = findPowerShell()
         if (psPath) {
-          const escapedAppPath = appPath.replace(/\\/g, '\\\\')
-          const command = `"${psPath}" -NoProfile -Command "Start-Process -FilePath \"${escapedAppPath}\" -Verb RunAs"`
-          console.log('[MachineId] Running command:', command)
+          // 用 spawn 数组传参（不走 cmd 解析）+ PowerShell 单引号包路径：
+          // 旧实现 `-Command "... -FilePath \"path\" ..."` 的嵌套双引号会被
+          // PowerShell argv 解析吞掉，安装路径含空格（C:\Program Files\...）时
+          // 路径被空格拆开导致提权重启静默失败。
+          const psQuotedPath = appPath.replace(/'/g, "''")
+          const psCommand = `Start-Process -FilePath '${psQuotedPath}' -Verb RunAs`
+          console.log('[MachineId] Running PowerShell:', psCommand)
 
-          exec(command, { windowsHide: true }, (error) => {
-            if (error) {
-              console.error('[MachineId] Admin restart via PowerShell failed:', error)
-            }
+          const child = spawn(psPath, ['-NoProfile', '-Command', psCommand], {
+            windowsHide: true,
+            detached: true,
+            stdio: 'ignore'
           })
+          child.on('error', (error) => {
+            console.error('[MachineId] Admin restart via PowerShell failed:', error)
+          })
+          child.unref()
         } else {
           // PowerShell 不可用时回退到 ShellExecute runas
           console.log('[MachineId] PowerShell not found, using electron shell openPath with runas')
@@ -256,13 +264,15 @@ export async function requestAdminRestart(): Promise<boolean> {
       }
 
       case 'macos': {
-        // macOS: 使用 osascript 请求管理员权限
-        const escapedPath = appPath.replace(/'/g, "\\'")
-        const script = `do shell script "open -n '${escapedPath}'" with administrator privileges`
-        exec(`osascript -e '${script}'`, (error) => {
-          if (error) {
-            console.error('[MachineId] Admin restart failed:', error)
-          }
+        // macOS: 使用 osascript 请求管理员权限。
+        // spawn 数组传参避免外层 shell 引号问题；路径先按 POSIX shell 规则单引号包裹
+        //（内部 ' 用 '\'' 转义），再按 AppleScript 双引号字符串规则转义 \ 和 "。
+        const shellQuotedPath = `'${appPath.replace(/'/g, "'\\''")}'`
+        const appleScriptCmd = `open -n ${shellQuotedPath}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+        const script = `do shell script "${appleScriptCmd}" with administrator privileges`
+        const child = spawn('osascript', ['-e', script], { stdio: 'ignore' })
+        child.on('error', (error) => {
+          console.error('[MachineId] Admin restart failed:', error)
         })
         setTimeout(() => app.quit(), 1000)
         return true

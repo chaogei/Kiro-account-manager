@@ -13,7 +13,7 @@ import {
   getNestedMap, getNestedStringMap
 } from './http-utils'
 import {
-  TempEmailService, MoEmailService, TempMailPlusService, ProtonWebviewService,
+  TempEmailService, MoEmailService, TempMailPlusService, ProtonWebviewService, GptMailService,
   parseOutlookLines, getInboxCount, waitForOTP
 } from './email-service'
 import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
@@ -870,6 +870,34 @@ export class Registrar {
       this.emailSvc = new ProtonWebviewService(this.cfg.protonEmail, (m) => this.log(m))
       this.email = await this.emailSvc.create()
       if (!this.email) throw new Error('Proton 邮箱地址为空')
+      this.emitStep('email-created')
+      this.log(`email=${this.email}`)
+      return
+    }
+
+    if (this.cfg.useGptMail) {
+      const mode = this.cfg.gptMailInboxEmail
+        ? `CF 转发 → ${this.cfg.gptMailInboxEmail}`
+        : this.cfg.gptMailPrivatePassword ? '私有域名直收（带密码）' : '私有域名直收'
+      this.log(`[3] 使用 GPTmail (${mode}) → mail.chatgpt.org.uk`)
+      if (!this.cfg.gptMailDomain) {
+        throw new Error('GPTmail 域名未配置')
+      }
+      // 复用注册流程已经初始化的 TLS SessionClient（伪装 Chrome 146 JA3 + 注入代理），
+      // 否则 GPTmail 后端通过 TLS 指纹校验会返回 401 "Browser session required"
+      if (!this.session) throw new Error('TLS SessionClient 未初始化，无法启动 GPTmail（请检查代理）')
+      this.emailSvc = new GptMailService({
+        baseURL: this.cfg.gptMailBaseURL,
+        inboxEmail: this.cfg.gptMailInboxEmail,
+        domain: this.cfg.gptMailDomain,
+        prefix: this.cfg.gptMailPrefix,
+        privatePassword: this.cfg.gptMailPrivatePassword,
+        // 传 getter 而非快照：Registrar 后续 rebuildTlsClient() 会换 session 实例，
+        // GptMailService 每次请求都读这里的最新引用，避免用到已 destroyed 的旧 session
+        getSession: () => this.session
+      })
+      this.email = await this.emailSvc.create()
+      if (!this.email) throw new Error('生成 GPTmail 注册邮箱失败')
       this.emitStep('email-created')
       this.log(`email=${this.email}`)
       return

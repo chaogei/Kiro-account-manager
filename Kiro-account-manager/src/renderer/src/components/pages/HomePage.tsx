@@ -1,10 +1,16 @@
 import { useMemo } from 'react'
-import { useAccountsStore } from '@/store/accounts'
+import { useAccountsStore, isBannedAccountError } from '@/store/accounts'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui'
-import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, FolderPlus, Tag, TrendingUp, Activity, BarChart3 } from 'lucide-react'
+import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, FolderPlus, Tag, TrendingUp, Activity, BarChart3, Ban, ChevronRight } from 'lucide-react'
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/hooks/useTranslation'
+import type { Account, AccountFilter } from '@/types/account'
+
+// 额度告急阈值（usage.percentUsed 为 0-1 小数）
+const QUOTA_WARN_RATIO = 0.9
+// 即将到期阈值（天）
+const EXPIRE_WARN_DAYS = 7
 
 // 订阅类型颜色映射
 const getSubscriptionColor = (type: string, title?: string): string => {
@@ -20,9 +26,35 @@ const getSubscriptionColor = (type: string, title?: string): string => {
 }
 
 export function HomePage() {
-  const { accounts, activeAccountId, getStats, darkMode, usagePrecision } = useAccountsStore()
+  const { accounts, activeAccountId, getStats, darkMode, usagePrecision, setFilter, setActiveGroupTab } = useAccountsStore()
   const { t } = useTranslation()
   const stats = getStats()
+
+  // 告警聚合：封禁 / 即将到期 / 额度告急（一次遍历，复用已有数据）
+  const warnings = useMemo(() => {
+    const banned: Account[] = []
+    const expiring: Account[] = []
+    const quotaHigh: Account[] = []
+    for (const a of accounts.values()) {
+      if (isBannedAccountError(a.lastError)) {
+        banned.push(a)
+        continue // 已封禁的不再重复计入其它告警
+      }
+      const days = a.subscription.daysRemaining
+      if (days !== undefined && days <= EXPIRE_WARN_DAYS) expiring.push(a)
+      if (a.status === 'active' && a.usage.limit > 0 && a.usage.percentUsed >= QUOTA_WARN_RATIO) {
+        quotaHigh.push(a)
+      }
+    }
+    return { banned, expiring, quotaHigh }
+  }, [accounts])
+
+  // 点击告警 → 应用筛选并跳转到账号页（清掉分组 Tab 限制，确保跨组可见）
+  const jumpToAccounts = (patch: AccountFilter): void => {
+    setActiveGroupTab('all')
+    setFilter(patch)
+    window.dispatchEvent(new CustomEvent('navigate-page', { detail: 'accounts' }))
+  }
 
   // 计算额度统计
   const usageStats = useMemo(() => {
@@ -93,6 +125,40 @@ export function HomePage() {
     [accounts, activeAccountId]
   )
 
+  // 告警卡行配置（仅渲染非空类别）
+  const warnRows = [
+    {
+      key: 'banned',
+      list: warnings.banned,
+      icon: Ban,
+      iconBg: 'bg-red-500/10',
+      iconColor: 'text-red-500',
+      label: isEn ? 'Banned' : '已封禁',
+      hint: isEn ? 'Need manual unban' : '需人工解封',
+      onClick: () => jumpToAccounts({ bannedOnly: true })
+    },
+    {
+      key: 'expiring',
+      list: warnings.expiring,
+      icon: Clock,
+      iconBg: 'bg-amber-500/10',
+      iconColor: 'text-amber-500',
+      label: isEn ? `Expiring (≤${EXPIRE_WARN_DAYS}d)` : `即将到期 (≤${EXPIRE_WARN_DAYS}天)`,
+      hint: isEn ? 'Renew soon' : '尽快续期',
+      onClick: () => jumpToAccounts({ daysRemainingMax: EXPIRE_WARN_DAYS })
+    },
+    {
+      key: 'quota',
+      list: warnings.quotaHigh,
+      icon: Zap,
+      iconBg: 'bg-orange-500/10',
+      iconColor: 'text-orange-500',
+      label: isEn ? `Quota ≥${Math.round(QUOTA_WARN_RATIO * 100)}%` : `额度告急 (≥${Math.round(QUOTA_WARN_RATIO * 100)}%)`,
+      hint: isEn ? 'Almost exhausted' : '即将耗尽',
+      onClick: () => jumpToAccounts({ usageMin: QUOTA_WARN_RATIO })
+    }
+  ].filter((r) => r.list.length > 0)
+
   return (
     <div className="flex-1 p-6 space-y-6 overflow-auto">
       {/* Header */}
@@ -133,6 +199,49 @@ export function HomePage() {
           )
         })}
       </div>
+
+      {/* 告警预警卡：有封禁/到期/额度告急时才显示 */}
+      {warnRows.length > 0 && (
+        <Card className="hover-lift border-amber-500/30">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-amber-500/10">
+                <AlertTriangle className="h-4 w-4 text-amber-500" />
+              </div>
+              {isEn ? 'Attention Needed' : '需要关注'}
+              <span className="text-xs font-normal text-muted-foreground">
+                {isEn ? 'Click a row to view affected accounts' : '点击查看受影响的账号'}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {warnRows.map((row) => {
+              const Icon = row.icon
+              const preview = row.list.slice(0, 3).map((a) => a.nickname || a.email).join('、')
+              const more = row.list.length > 3 ? (isEn ? ` +${row.list.length - 3} more` : ` 等 ${row.list.length} 个`) : ''
+              return (
+                <button
+                  key={row.key}
+                  onClick={row.onClick}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl bg-muted/40 hover:bg-muted transition-colors text-left group"
+                >
+                  <div className={cn('p-2 rounded-lg shrink-0', row.iconBg)}>
+                    <Icon className={cn('h-4 w-4', row.iconColor)} />
+                  </div>
+                  <div className="flex items-baseline gap-2 shrink-0">
+                    <span className="text-lg font-bold tabular-nums">{row.list.length}</span>
+                    <span className="text-sm font-medium">{row.label}</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground truncate flex-1 min-w-0">
+                    {preview}{more}
+                  </span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              )
+            })}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Usage Stats */}
       {usageStats.validAccountCount > 0 && (

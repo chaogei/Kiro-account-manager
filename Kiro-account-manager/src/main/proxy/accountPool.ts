@@ -192,7 +192,9 @@ export class AccountPool {
   }
 
   // 检查账号是否可用（断路器 + 指数退避 + 概率重试）
-  private isAccountAvailable(account: ProxyAccount, now: number): boolean {
+  // allowProbabilisticRetry=false 用于统计/计数场景：冷却中一律视为不可用，
+  // 避免 Math.random() 让 availableCount / getQuotaStatus 的数字来回抖动
+  private isAccountAvailable(account: ProxyAccount, now: number, allowProbabilisticRetry = true): boolean {
     // 检查是否被 Kiro 后端封禁（需人工解封）
     if (this.isSuspended(account)) {
       return false
@@ -225,6 +227,10 @@ export class AccountPool {
       const effectiveCooldown = this.config.baseCooldownMs * backoffMultiplier
 
       if (timeSinceFailure < effectiveCooldown) {
+        // 统计场景：冷却中确定性地视为不可用
+        if (!allowProbabilisticRetry) {
+          return false
+        }
         // 未超出冷却期，用概率重试
         if (Math.random() > this.config.probabilisticRetryChance) {
           return false
@@ -365,11 +371,18 @@ export class AccountPool {
     // RECOVERABLE: 增加失败计数，断路器指数退避自动生效
     const errorCount = (account.errorCount || 0) + 1
     let quotaExhaustedAt = account.quotaExhaustedAt
+    let quotaResetAt = account.quotaResetAt
 
-    // 配额类错误额外标记耗尽
+    // 配额类错误额外标记耗尽，并按配置的 quotaResetMs 设定自动恢复时间。
+    // 否则 quotaExhaustedAt 一直 > 0，isQuotaExhausted 永远为 true，
+    // 该账号会被永久跳过（直到 updateQuota/reset 被显式调用）。
     const isQuotaError = statusCode === 402 || statusCode === 429
     if (isQuotaError) {
       quotaExhaustedAt = now
+      // 仅在没有更明确的重置时间，或已有重置时间已过期时，按冷却窗口顺延
+      if (!quotaResetAt || quotaResetAt <= now) {
+        quotaResetAt = now + this.config.quotaResetMs
+      }
     }
 
     // 计算当前退避时间用于日志
@@ -385,6 +398,7 @@ export class AccountPool {
       ...account,
       errorCount,
       quotaExhaustedAt,
+      quotaResetAt,
       lastUsed: now
     })
   }
@@ -424,7 +438,7 @@ export class AccountPool {
         exhausted++
       } else if (account.cooldownUntil && account.cooldownUntil > now) {
         cooldown++
-      } else if (this.isAccountAvailable(account, now)) {
+      } else if (this.isAccountAvailable(account, now, false)) {
         available++
       }
     }
@@ -494,12 +508,12 @@ export class AccountPool {
     return this.accounts.size
   }
 
-  // 获取可用账号数量
+  // 获取可用账号数量（统计用：不带概率重试抖动）
   get availableCount(): number {
     const now = Date.now()
     let count = 0
     for (const account of this.accounts.values()) {
-      if (this.isAccountAvailable(account, now)) {
+      if (this.isAccountAvailable(account, now, false)) {
         count++
       }
     }

@@ -1865,6 +1865,147 @@ let proactiveRenewalTimer: NodeJS.Timeout | null = null
 // 在 token 剩余多久时触发主动续期。15 分钟 > Kiro IDE 的 10 分钟阈值，确保抢先。
 const PROACTIVE_RENEWAL_LEAD_MS = 15 * 60 * 1000
 
+// ============ 账号池 token 主动刷新（主进程调度，不依赖窗口存活）============
+//
+// 背景：原先只有渲染进程的 setInterval 调度池内 token 刷新，窗口最小化到托盘后会被
+// Chromium 后台节流，导致 token 过期数分钟才刷新。这里把"调度"搬到主进程：主进程定时器
+// 不受窗口可见性影响，到点读 store 里的账号、刷新即将过期的 token，结果经
+// background-refresh-result 事件回流给渲染进程持久化（窗口隐藏但仍存活）。
+// 渲染进程定时器保留（已关后台节流）做信息同步/自动换号；两边的 token 刷新由
+// poolRefreshInFlightIds 去重，避免对同一 refreshToken 并发刷新把其中一个用作废。
+type BackgroundRefreshAccount = {
+  id: string
+  idp?: string
+  profileArn?: string
+  needsTokenRefresh?: boolean
+  machineId?: string
+  credentials: {
+    refreshToken: string
+    clientId?: string
+    clientSecret?: string
+    region?: string
+    authMethod?: string
+    accessToken?: string
+    provider?: string
+    profileArn?: string
+  }
+}
+/** background-batch-refresh 的核心实现（由 IPC 与主进程调度器共用）。在 whenReady 中赋值。 */
+let backgroundBatchRefreshImpl:
+  | ((accounts: BackgroundRefreshAccount[], concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>)
+  | null = null
+/** 正在刷新中的账号 ID 去重集合，渲染进程与主进程调度器共享，防止同一 refreshToken 被并发刷新。 */
+const poolRefreshInFlightIds = new Set<string>()
+let mainPoolRefreshTimer: NodeJS.Timeout | null = null
+
+/** 主进程侧的封禁/挂起判定，镜像渲染进程的 isBannedAccountError */
+function isBannedAccountErrorMain(error?: string): boolean {
+  if (!error) return false
+  const e = error.toLowerCase()
+  return e.includes('accountsuspendedexception')
+    || e.includes('account suspended')
+    || e.includes('temporarily_suspended')
+    || e.includes('temporarily suspended')
+    || e.includes('已封禁')
+    || /\b423\b/.test(e)
+}
+
+/** 刷新提前量：≥ 2× 检查间隔且不少于 10 分钟，确保 token 不会在两次 tick 之间过期。 */
+function mainTokenRefreshLeadMs(intervalMin: number): number {
+  return Math.max(intervalMin * 2 * 60 * 1000, 10 * 60 * 1000)
+}
+
+/** 读取 store 里的账号，刷新即将过期的池内 token（仅刷 token，信息同步仍由渲染进程负责）。 */
+async function runMainPoolTokenRefreshTick(): Promise<void> {
+  if (!backgroundBatchRefreshImpl) return
+  try {
+    if (!store) { await initStore() }
+    if (!store) return
+    const data = store.get('accountData') as {
+      accounts?: Record<string, {
+        id?: string
+        email?: string
+        idp?: string
+        profileArn?: string
+        machineId?: string
+        lastError?: string
+        credentials?: {
+          refreshToken?: string
+          clientId?: string
+          clientSecret?: string
+          region?: string
+          authMethod?: string
+          accessToken?: string
+          provider?: string
+          profileArn?: string
+          expiresAt?: number
+        }
+      }>
+      autoRefreshEnabled?: boolean
+      autoRefreshInterval?: number
+      autoRefreshConcurrency?: number
+    } | undefined
+    if (!data?.accounts) return
+    if (data.autoRefreshEnabled === false) return
+
+    const intervalMin = Math.max(1, data.autoRefreshInterval ?? 5)
+    const leadMs = mainTokenRefreshLeadMs(intervalMin)
+    const concurrency = Math.max(1, Math.min(500, data.autoRefreshConcurrency ?? 100))
+    const now = Date.now()
+
+    const toRefresh: BackgroundRefreshAccount[] = []
+    for (const [id, acc] of Object.entries(data.accounts)) {
+      const creds = acc?.credentials
+      if (!creds?.refreshToken) continue
+      if (isBannedAccountErrorMain(acc.lastError)) continue
+      const expiresAt = creds.expiresAt
+      // 只刷"即将过期/已过期"的；没有 expiresAt 的跳过（无从判断）
+      if (!expiresAt || expiresAt - now > leadMs) continue
+      toRefresh.push({
+        id,
+        idp: acc.idp,
+        profileArn: acc.profileArn,
+        needsTokenRefresh: true,
+        machineId: acc.machineId,
+        credentials: {
+          refreshToken: creds.refreshToken,
+          clientId: creds.clientId,
+          clientSecret: creds.clientSecret,
+          region: creds.region,
+          authMethod: creds.authMethod,
+          accessToken: creds.accessToken,
+          provider: creds.provider,
+          profileArn: creds.profileArn
+        }
+      })
+    }
+
+    if (toRefresh.length === 0) return
+    console.log(`[MainPoolRefresh] ${toRefresh.length} token(s) expiring within ${Math.round(leadMs / 60000)}min, refreshing...`)
+    // syncInfo=false：仅刷 token；用量/订阅等信息同步由渲染进程定时器负责，避免主进程跑重活
+    await backgroundBatchRefreshImpl(toRefresh, concurrency, false)
+  } catch (err) {
+    console.warn('[MainPoolRefresh] tick failed:', err instanceof Error ? err.message : err)
+  }
+}
+
+/** 启动主进程池 token 刷新调度器（不依赖窗口可见/存活）。 */
+function startMainPoolTokenRefresh(): void {
+  stopMainPoolTokenRefresh()
+  // 启动后稍等片刻先跑一次（让 store 与账号池就绪），之后每分钟检查一次；
+  // 实际是否需要刷新由 runMainPoolTokenRefreshTick 内按 expiresAt + 提前量判定。
+  setTimeout(() => { void runMainPoolTokenRefreshTick() }, 15_000)
+  mainPoolRefreshTimer = setInterval(() => { void runMainPoolTokenRefreshTick() }, 60_000)
+  console.log('[MainPoolRefresh] Scheduler started (main process, checks every 60s)')
+}
+
+function stopMainPoolTokenRefresh(): void {
+  if (mainPoolRefreshTimer) {
+    clearInterval(mainPoolRefreshTimer)
+    mainPoolRefreshTimer = null
+  }
+}
+
 // ============ 托盘相关变量 ============
 let traySettings: TraySettings = { ...defaultTraySettings }
 let isQuitting = false // 标记是否真正退出应用
@@ -2035,7 +2176,11 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // 关闭后台节流：最小化到托盘后窗口被隐藏，Chromium 默认会把渲染进程里的
+      // setInterval（含 token 自动刷新定时器）重度降频（对齐到约每分钟甚至更慢），
+      // 导致挂托盘时 token 过期好几分钟才刷新。关掉它保证定时器照常运行。
+      backgroundThrottling: false
     }
   })
 
@@ -3468,23 +3613,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 后台批量刷新账号（在主进程执行，不阻塞 UI）
-  ipcMain.handle('background-batch-refresh', async (_event, accounts: Array<{
-    id: string
-    idp?: string
-    profileArn?: string
-    needsTokenRefresh?: boolean
-    machineId?: string  // 账户绑定的设备 ID
-    credentials: {
-      refreshToken: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      accessToken?: string
-      provider?: string
-      profileArn?: string
-    }
-  }>, concurrency: number = 10, syncInfo: boolean = true) => {
+  const backgroundBatchRefresh = async (accounts: BackgroundRefreshAccount[], concurrency: number = 10, syncInfo: boolean = true): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
     console.log(`[BackgroundRefresh] Starting batch refresh for ${accounts.length} accounts, concurrency: ${concurrency}, syncInfo: ${syncInfo}`)
     
     let completed = 0
@@ -3497,6 +3626,13 @@ app.whenReady().then(async () => {
       
       await Promise.allSettled(
         batch.map(async (account) => {
+          // 去重：渲染进程定时器与主进程调度器可能同时触发刷新，
+          // 对同一账号并发刷新会让其中一个用到被 rotate 作废的旧 refreshToken。
+          // 已在途则跳过本次（不计入成败，等在途那次的结果回流即可）。
+          if (account.id && poolRefreshInFlightIds.has(account.id)) {
+            return
+          }
+          if (account.id) poolRefreshInFlightIds.add(account.id)
           try {
             const { refreshToken, clientId, clientSecret, region, authMethod, accessToken, provider } = account.credentials
             const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
@@ -3829,6 +3965,8 @@ app.whenReady().then(async () => {
               success: false,
               error: e instanceof Error ? e.message : 'Unknown error'
             })
+          } finally {
+            if (account.id) poolRefreshInFlightIds.delete(account.id)
           }
         })
       )
@@ -3849,7 +3987,12 @@ app.whenReady().then(async () => {
 
     console.log(`[BackgroundRefresh] Completed: ${success} success, ${failed} failed`)
     return { success: true, completed, successCount: success, failedCount: failed }
-  })
+  }
+  // 暴露给主进程调度器复用（startMainPoolTokenRefresh）
+  backgroundBatchRefreshImpl = backgroundBatchRefresh
+  ipcMain.handle('background-batch-refresh', (_event, accounts: BackgroundRefreshAccount[], concurrency: number = 10, syncInfo: boolean = true) => backgroundBatchRefresh(accounts, concurrency, syncInfo))
+  // 启动主进程池 token 刷新调度器（不依赖窗口可见/存活，挂托盘也照常刷新）
+  startMainPoolTokenRefresh()
 
   // IPC: 后台批量检查账号状态（不刷新 Token，只检查状态）
   ipcMain.handle('background-batch-check', async (_event, accounts: Array<{
@@ -7145,6 +7288,9 @@ app.on('will-quit', async (event) => {
   // 防止重复处理
   if (isQuitting) return
   
+  // 停止主进程池 token 刷新调度器
+  stopMainPoolTokenRefresh()
+
   // 防止应用立即退出，先保存数据
   if (lastSavedData && store) {
     event.preventDefault()

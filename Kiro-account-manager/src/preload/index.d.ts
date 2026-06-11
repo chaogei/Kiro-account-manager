@@ -884,6 +884,12 @@ interface KiroApi {
     tempMailPlusDomain?: string
     useProton?: boolean
     protonEmail?: string
+    useGptMail?: boolean
+    gptMailBaseURL?: string
+    gptMailInboxEmail?: string
+    gptMailDomain?: string
+    gptMailPrefix?: string
+    gptMailPrivatePassword?: string
     password?: string
     fullName?: string
     taskId?: string

@@ -1236,7 +1236,8 @@ function throwIfAborted(signal?: AbortSignal): void {
 export async function callKiroApiStream(
   account: ProxyAccount,
   payload: KiroPayload,
-  onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void,
+  // onChunk 可返回 Promise：下游 SSE 写缓冲打满时返回 drain promise，流解析 await 实现背压
+  onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void | Promise<void>,
   onComplete: (usage: KiroUsage) => void,
   onError: (error: Error) => void,
   signal?: AbortSignal,
@@ -1451,7 +1452,7 @@ export function estimateTokens(text: string): number {
 // 解析 AWS Event Stream 二进制格式
 async function parseEventStream(
   body: ReadableStream<Uint8Array>,
-  onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void,
+  onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void | Promise<void>,
   onComplete: (usage: KiroUsage) => void,
   onError: (error: Error) => void,
   inputChars: number = 0,  // 输入字符长度（兜底估算用）
@@ -1567,10 +1568,11 @@ async function parseEventStream(
     return hold
   }
   // 处理 leakCarry：正常文本经 onChunk 输出，泄漏工具暂存 leakedTools。isFlush 时吐出残留。
-  const filterToolLeak = (isFlush: boolean): void => {
-    const emit = (s: string): void => {
+  // async：emit await onChunk 以保留 SSE 背压（慢客户端时暂停拉流，避免内存堆积）
+  const filterToolLeak = async (isFlush: boolean): Promise<void> => {
+    const emit = async (s: string): Promise<void> => {
       if (!s) return
-      onChunk(s)
+      await onChunk(s)
       totalOutputChars += s.length
       collectedOutputText += s
     }
@@ -1580,7 +1582,7 @@ async function parseEventStream(
       if (fi === -1) break
       const ci = leakCarry.indexOf('</invoke>', fi)
       if (ci === -1) break // 未闭合，等更多帧
-      emit(stripToolPrefix(leakCarry.slice(0, fi)))
+      await emit(stripToolPrefix(leakCarry.slice(0, fi)))
       const localRe = /<invoke name="([^"]+)">([\s\S]*?)<\/invoke>/g
       localRe.lastIndex = fi
       let m: RegExpExecArray | null
@@ -1605,23 +1607,23 @@ async function parseEventStream(
     if (hasOpenInvoke(leakCarry)) {
       if (isFlush) {
         // 流结束仍未闭合 = 损坏的工具调用，原样当文本输出（不丢字符）
-        emit(leakCarry)
+        await emit(leakCarry)
         leakCarry = ''
         return
       }
       const oi = leakCarry.indexOf('<invoke name=')
       const safe = stripToolPrefix(leakCarry.slice(0, oi))
-      emit(safe)
+      await emit(safe)
       leakCarry = leakCarry.slice(safe.length)
       return
     }
     if (isFlush) {
-      emit(leakCarry)
+      await emit(leakCarry)
       leakCarry = ''
       return
     }
     const hold = pendingToolTail(leakCarry)
-    emit(leakCarry.slice(0, leakCarry.length - hold))
+    await emit(leakCarry.slice(0, leakCarry.length - hold))
     leakCarry = leakCarry.slice(leakCarry.length - hold)
   }
   // ===== 工具调用 XML 泄漏修复 end =====
@@ -1686,12 +1688,12 @@ async function parseEventStream(
                 if (toolLeakFixEnabled) {
                   // 跨帧过滤：分离正常文本与泄漏的工具调用 XML
                   leakCarry += content
-                  filterToolLeak(false)
+                  await filterToolLeak(false)
                 } else {
                   // 回退：原逐帧 <tool_use> 过滤
                   const stripped = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
                   if (stripped) {
-                    onChunk(stripped)
+                    await onChunk(stripped)
                     totalOutputChars += stripped.length
                     collectedOutputText += stripped
                   }
@@ -1708,11 +1710,11 @@ async function parseEventStream(
               if (content) {
                 if (toolLeakFixEnabled) {
                   leakCarry += content
-                  filterToolLeak(false)
+                  await filterToolLeak(false)
                 } else {
                   const stripped = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
                   if (stripped) {
-                    onChunk(stripped)
+                    await onChunk(stripped)
                     totalOutputChars += stripped.length
                     collectedOutputText += stripped
                   }
@@ -1746,7 +1748,7 @@ async function parseEventStream(
                         finalInput = JSON.parse(currentToolUse.inputBuffer)
                       }
                     } catch { /* 忽略解析错误 */ }
-                    onChunk('', {
+                    await onChunk('', {
                       toolUseId: currentToolUse.toolUseId,
                       name: currentToolUse.name,
                       input: finalInput
@@ -1805,7 +1807,7 @@ async function parseEventStream(
                 }
                 
                 // 只有在成功解析或有错误信息时才发送
-                onChunk('', {
+                await onChunk('', {
                   toolUseId: currentToolUse.toolUseId,
                   name: currentToolUse.name,
                   input: finalInput
@@ -1817,7 +1819,7 @@ async function parseEventStream(
 
                 // 如果解析失败，额外发送一条文本消息告知用户
                 if (parseError) {
-                  onChunk(`\n\n⚠️ Tool "${currentToolUse.name}" input was truncated by Kiro API. The output may be incomplete due to token limits.`)
+                  await onChunk(`\n\n⚠️ Tool "${currentToolUse.name}" input was truncated by Kiro API. The output may be incomplete due to token limits.`)
                 }
                 
                 processedIds.add(currentToolUse.toolUseId)
@@ -1919,7 +1921,7 @@ async function parseEventStream(
                     return `- [${title}](${link.url})`
                   })
                 if (links.length > 0) {
-                  onChunk(`\n\n🔗 **Web References:**\n${links.join('\n')}`)
+                  await onChunk(`\n\n🔗 **Web References:**\n${links.join('\n')}`)
                 }
               }
               proxyLogger.debug('Kiro', 'supplementaryWebLinksEvent', JSON.stringify(webLinksEvent).slice(0, 300))
@@ -1969,16 +1971,16 @@ async function parseEventStream(
               const reasoning = event.reasoningContentEvent || event
               if (reasoning.text) {
                 proxyLogger.info('Kiro', `Received reasoning content (isThinking=true): ${reasoning.text.slice(0, 50)}...`)
-                onChunk(reasoning.text, undefined, true, reasoning.signature, undefined)
+                await onChunk(reasoning.text, undefined, true, reasoning.signature, undefined)
                 totalOutputChars += reasoning.text.length
                 usage.reasoningTokens = (usage.reasoningTokens || 0) + Math.max(1, Math.round(reasoning.text.length * 0.4))
               } else if (reasoning.signature && !reasoning.redactedContent) {
-                onChunk('', undefined, true, reasoning.signature, undefined)
+                await onChunk('', undefined, true, reasoning.signature, undefined)
               }
               // 处理 redactedContent（重编辑的加密 thinking 内容）
               if (reasoning.redactedContent) {
                 proxyLogger.info('Kiro', `Received redacted thinking content (len=${reasoning.redactedContent.length})`)
-                onChunk('', undefined, true, undefined, reasoning.redactedContent)
+                await onChunk('', undefined, true, undefined, reasoning.redactedContent)
               }
               proxyLogger.debug('Kiro', 'reasoningContentEvent', JSON.stringify(reasoning).slice(0, 200))
             }
@@ -1998,7 +2000,7 @@ async function parseEventStream(
                     return parts.join(', ')
                   })
                 if (refTexts.length > 0) {
-                  onChunk(`\n\n📚 **Code References:**\n${refTexts.join('\n')}`)
+                  await onChunk(`\n\n📚 **Code References:**\n${refTexts.join('\n')}`)
                 }
               }
               proxyLogger.debug('Kiro', 'codeReferenceEvent', JSON.stringify(codeRef).slice(0, 300))
@@ -2012,7 +2014,7 @@ async function parseEventStream(
                 if (prompt.content || prompt.userIntent) {
                   // 将后续提示作为建议输出
                   const suggestion = prompt.content || prompt.userIntent
-                  onChunk(`\n\n💡 **Suggested follow-up:** ${suggestion}`)
+                  await onChunk(`\n\n💡 **Suggested follow-up:** ${suggestion}`)
                 }
               }
               proxyLogger.debug('Kiro', 'followupPromptEvent', JSON.stringify(followup).slice(0, 200))
@@ -2039,7 +2041,7 @@ async function parseEventStream(
               const message = invalid.message || 'Invalid state detected'
               console.error('[Kiro] invalidStateEvent:', reason, message)
               // 将无效状态作为错误消息输出
-              onChunk(`\n\n⚠️ **Warning:** ${message} (reason: ${reason})`)
+              await onChunk(`\n\n⚠️ **Warning:** ${message} (reason: ${reason})`)
             }
             
             // 处理 citationEvent - 引用事件
@@ -2056,7 +2058,7 @@ async function parseEventStream(
                     return parts.join(' ')
                   })
                 if (citationTexts.length > 0) {
-                  onChunk(`\n\n📖 **Citations:**\n${citationTexts.join('\n')}`)
+                  await onChunk(`\n\n📖 **Citations:**\n${citationTexts.join('\n')}`)
                 }
               }
               proxyLogger.debug('Kiro', 'citationEvent', JSON.stringify(citation).slice(0, 300))
@@ -2084,7 +2086,7 @@ async function parseEventStream(
 
     // 工具调用 XML 泄漏修复：flush 过滤器残留文本
     if (toolLeakFixEnabled) {
-      try { filterToolLeak(true) } catch { /* ignore */ }
+      try { await filterToolLeak(true) } catch { /* ignore */ }
     }
 
     // 完成任何未完成的 tool use
@@ -2095,7 +2097,7 @@ async function parseEventStream(
           finalInput = JSON.parse(currentToolUse.inputBuffer)
         }
       } catch { /* 忽略解析错误 */ }
-      onChunk('', {
+      await onChunk('', {
         toolUseId: currentToolUse.toolUseId,
         name: currentToolUse.name,
         input: finalInput
@@ -2121,7 +2123,7 @@ async function parseEventStream(
         seenToolSigs.add(sig)
         leakIdCounter++
         const rescuedId = `toolleakfix_${Date.now().toString(36)}_${leakIdCounter.toString(36)}`
-        onChunk('', { toolUseId: rescuedId, name: lt.name, input: lt.input })
+        await onChunk('', { toolUseId: rescuedId, name: lt.name, input: lt.input })
         rescued++
       }
       if (rescued > 0 || toolLeakDebug) {

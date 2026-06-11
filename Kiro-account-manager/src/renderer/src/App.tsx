@@ -6,7 +6,7 @@ import { HomePage, AboutPage, SettingsPage, MachineIdPage, KiroSettingsPage, Pro
 import { useWebhookStore } from './store/webhooks'
 import { UpdateDialog } from './components/UpdateDialog'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
-import { useAccountsStore } from './store/accounts'
+import { useAccountsStore, isBannedAccountError } from './store/accounts'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
 const TRAY_UPDATE_DEBOUNCE_MS = 400
@@ -154,6 +154,48 @@ function App(): React.JSX.Element {
     window.addEventListener('navigate-page', handler)
     return () => window.removeEventListener('navigate-page', handler)
   }, [])
+
+  // 新增封禁账号 → 桌面通知（仅"新封禁"弹一次，去重 + 启动宽限期避免初次加载/批量刷新时刷屏）
+  const bannedNotifyStartRef = useRef(Date.now())
+  useEffect(() => {
+    if (typeof Notification === 'undefined') return
+    const KEY = 'kiro-notified-banned-ids'
+    let notifiedSet: Set<string>
+    try {
+      notifiedSet = new Set<string>(JSON.parse(localStorage.getItem(KEY) || '[]'))
+    } catch {
+      notifiedSet = new Set<string>()
+    }
+
+    const currentBanned: string[] = []
+    const fresh: { email: string; nickname?: string }[] = []
+    for (const a of accounts.values()) {
+      if (isBannedAccountError(a.lastError)) {
+        currentBanned.push(a.id)
+        if (!notifiedSet.has(a.id)) fresh.push({ email: a.email, nickname: a.nickname })
+      }
+    }
+
+    // 启动后 8s 内只建立基线、不弹通知（覆盖异步加载 + 首次状态检查），之后才对新封禁弹窗
+    const inGracePeriod = Date.now() - bannedNotifyStartRef.current < 8000
+    if (!inGracePeriod && fresh.length > 0 && Notification.permission !== 'denied') {
+      const fire = (): void => {
+        const lang = useAccountsStore.getState().language
+        const isEn = lang === 'en' || (lang === 'auto' && !navigator.language.startsWith('zh'))
+        const title = fresh.length === 1
+          ? (isEn ? 'Account banned' : '账号被封禁')
+          : (isEn ? `${fresh.length} accounts banned` : `${fresh.length} 个账号被封禁`)
+        const names = fresh.slice(0, 3).map((a) => a.nickname || a.email)
+        const body = names.join('\n') + (fresh.length > 3 ? (isEn ? `\n+${fresh.length - 3} more` : `\n等 ${fresh.length} 个`) : '')
+        try { new Notification(title, { body }) } catch { /* ignore */ }
+      }
+      if (Notification.permission === 'granted') fire()
+      else void Notification.requestPermission().then((p) => { if (p === 'granted') fire() })
+    }
+
+    // 持久化当前仍封禁的集合：已解封的移出（将来再次封禁可重新提醒），新封禁的记入避免重复弹
+    try { localStorage.setItem(KEY, JSON.stringify(currentBanned)) } catch { /* ignore */ }
+  }, [accounts])
 
   // 关闭/刷新前强制 flush 防抖中的待保存数据，防止数据丢失
   useEffect(() => {

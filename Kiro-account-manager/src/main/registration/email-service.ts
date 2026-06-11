@@ -1,5 +1,6 @@
 import * as tls from 'tls'
 import { fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
+import type { SessionClient } from 'tlsclientwrapper'
 import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
 import { randomEmailPrefix } from './names'
 import { waitProtonOtp } from './proton-mail-window'
@@ -300,6 +301,465 @@ export class TempMailPlusService implements TempEmailService {
     if (code) return code
     // 从 HTML 提取
     const html = String(detail.html || '')
+    return extractCode(html)
+  }
+}
+
+// ============ GPTmail (mail.chatgpt.org.uk) — 域名邮箱取码 ============
+
+/**
+ * GPTmail（mail.chatgpt.org.uk）取码源，**同时支持两种玩法**：
+ *
+ * 玩法 A：私有域名直收（推荐，无需 CF）
+ *   1) 用户把自己域名 MX 直接解析到 GPTmail（在 GPTmail 站点添加私有/公开域名后会给 MX 指令）
+ *   2) 注册时生成 `prefix@用户域名` —— 这个地址本身就是 GPTmail 上的 inbox，
+ *      所有发到它的邮件 GPTmail 直接收到
+ *   3) 用同一个地址 GET 页面拿 token，轮询取码
+ *   inboxEmail 留空表示走这个模式。
+ *
+ * 玩法 B：CF Email Routing 转发
+ *   1) 用户在 GPTmail 上拥有一个固定接收邮箱（如公共域名池里的 abc@msn-mail-free-9224.dynv6.net）
+ *   2) 用户在自己域名 Cloudflare 配 catch-all：*@example.com → abc@msn-mail-free-9224.dynv6.net
+ *   3) 注册时生成 `prefix@example.com`，CF 转发到接收邮箱
+ *   4) 用接收邮箱的 token 轮询，从邮件里软匹配本次注册地址（CF 转发的邮件 to 字段会是接收邮箱）
+ *   inboxEmail 填了表示走这个模式。
+ *
+ * GPTmail 协议要点（基于官方前端 + 抓包）：
+ *  - 直接 GET `https://mail.chatgpt.org.uk/<email>` 页面，从 HTML 解析 `window.__BROWSER_AUTH.token`
+ *    （服务端 SSR 嵌入，这是浏览器拿初始 token 的"零成本"路径，比 POST /api/inbox-token 更不易被反爬）
+ *  - GET /api/emails?email=<inbox> (header x-inbox-token)
+ *      -> {success, data:{emails:[{id, email_address, from_address, subject, content, html_content}]}, auth:{token,...}}
+ *  - DELETE /api/emails/clear?email=<inbox> (header x-inbox-token)
+ *  - 每次响应都会刷新 token（含 sid+email+exp），本类自动滚动保存
+ *  - Cloudflare 后端通过 TLS 指纹 + sec-ch-* + Referer 校验"是否真实 Chrome"，
+ *    所以本类必须通过 tlsclientwrapper SessionClient 发请求
+ */
+export class GptMailService implements TempEmailService {
+  private static readonly DEFAULT_BASE_URL = 'https://mail.chatgpt.org.uk'
+  // 与 sessionOpts 的 tlsClientIdentifier='chrome_146' 及 SessionClient 默认 UA 保持一致，
+  // 否则 sec-ch-ua / UA / JA3 三者版本对不上，容易被 Cloudflare 风控识破。
+  private static readonly CHROME_MAJOR = 146
+  private static readonly UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${GptMailService.CHROME_MAJOR}.0.0.0 Safari/537.36`
+  private static readonly SEC_CH_UA = `"Google Chrome";v="${GptMailService.CHROME_MAJOR}", "Chromium";v="${GptMailService.CHROME_MAJOR}", "Not)A;Brand";v="24"`
+
+  private readonly baseURL: string
+  /**
+   * 固定接收邮箱（CF 转发目标）。
+   * - 玩法 A（私有域名直收）：留空 —— 本次注册地址本身就是 inbox
+   * - 玩法 B（CF 转发）：填了，所有 prefix@domain 都转发到这个邮箱
+   */
+  private readonly fixedInboxEmail: string
+  /** 用户自己的域名池（玩法 A：MX 已解析到 GPTmail；玩法 B：CF 配了 catch-all）*/
+  private readonly domains: string[]
+  /** 可选的固定前缀；留空则用 randomEmailPrefix() 生成 */
+  private readonly fixedPrefix: string
+  /**
+   * 可选：私有域名密码。
+   * 在 GPTmail 站点添加「私有域名」时会设一个密码，所有该域名下的 inbox 查看邮件前必须 unlock。
+   * 留空 = 公共域名或公开域名（不需密码）。
+   */
+  private readonly privatePassword: string
+  /**
+   * 取当前 TLS SessionClient 的 getter（伪装 Chrome JA3 指纹）。
+   * GPTmail 后端通过 TLS 握手指纹校验"是否真实浏览器"，
+   * Node 默认 TLS / undici 会被识破返回 401 "Browser session required"，
+   * 所以必须用 Registrar 已经初始化好的 SessionClient 发请求。
+   *
+   * 关键：这里**不能缓存 SessionClient 实例**。Registrar 在注册过程中（Portal/WorkflowInit
+   * 重试、网络抖动、可恢复 TLS 错误）会 rebuildTlsClient() —— 销毁旧 session 再建新的。
+   * 若缓存旧引用，邮箱创建后到取码之间一旦发生 rebuild，旧 session 已 destroyed，
+   * 后续每次轮询都会抛 "SessionClient has been destroyed" 直到超时。
+   * 因此每次请求都通过 getter 读取 Registrar 的**最新** session。
+   */
+  private readonly getSession: () => SessionClient | null
+
+  /** 本次注册使用的"用户侧"邮箱地址（prefix@用户域名）—— 注册站点看到的就是它 */
+  private address = ''
+  /** 实际查询邮件用的 GPTmail inbox 地址（玩法 A = address；玩法 B = fixedInboxEmail）*/
+  private inboxEmail = ''
+  /** 当前滚动 token：每次响应若带回 auth.token 则替换 */
+  private token = ''
+  /**
+   * create() 时已存在于 inbox 的邮件 ID 基线。
+   * CF 转发模式下多个并发注册共享同一 inbox，绝不能用全量 clear（会删掉别的任务待取的验证码）；
+   * 改为记录基线 ID，轮询时跳过这些旧邮件，做到无副作用、并发安全。
+   */
+  private baselineIds = new Set<string>()
+
+  constructor(opts: {
+    baseURL?: string
+    inboxEmail?: string
+    domain: string
+    prefix?: string
+    privatePassword?: string
+    /** 取当前 SessionClient 的 getter（不缓存，规避 rebuildTlsClient 后引用失效） */
+    getSession: () => SessionClient | null
+  }) {
+    if (typeof opts.getSession !== 'function') {
+      throw new Error('GPTmail 必须传入 getSession（用于每次取最新 TLS SessionClient 绕过 401 校验）')
+    }
+    this.getSession = opts.getSession
+    this.baseURL = GptMailService.normalizeBaseURL(opts.baseURL || GptMailService.DEFAULT_BASE_URL)
+    this.fixedInboxEmail = (opts.inboxEmail || '').trim()
+    if (this.fixedInboxEmail && !this.fixedInboxEmail.includes('@')) {
+      throw new Error('GPTmail 接收邮箱格式无效（应为 xxx@yyy.zzz，或留空走私有域名直收）')
+    }
+    this.domains = (opts.domain || '')
+      .split(/[\s,;]+/)
+      .map((d) => d.trim().replace(/^@/, ''))
+      .filter(Boolean)
+    if (this.domains.length === 0) {
+      throw new Error('GPTmail 自建域名池为空（私有模式: MX 已解析到 GPTmail 的域名；CF 模式: CF 配了 catch-all 的域名）')
+    }
+    this.fixedPrefix = (opts.prefix || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '')
+    this.privatePassword = (opts.privatePassword || '').trim()
+  }
+
+  private static normalizeBaseURL(raw: string): string {
+    const trimmed = (raw || '').trim().replace(/\/+$/, '')
+    if (!trimmed) return 'https://mail.chatgpt.org.uk'
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+    let u: URL
+    try {
+      u = new URL(withScheme)
+    } catch {
+      throw new Error(`GPTmail BaseURL 格式无效: ${raw}`)
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      throw new Error(`GPTmail BaseURL 协议不支持 (仅支持 http/https): ${u.protocol}`)
+    }
+    return withScheme
+  }
+
+  /**
+   * 从页面 HTML 中提取 `window.__BROWSER_AUTH = {...}` 的 JSON 文本。
+   * 用括号配平扫描（识别字符串与转义），从第一个 `{` 开始找到与之匹配的 `}`，
+   * 支持对象内含嵌套 {} —— 比非贪婪正则健壮。
+   */
+  private static extractBrowserAuthJson(html: string): string | null {
+    const anchor = html.indexOf('__BROWSER_AUTH')
+    if (anchor < 0) return null
+    const start = html.indexOf('{', anchor)
+    if (start < 0) return null
+    let depth = 0
+    let inStr = false
+    let quote = ''
+    let escaped = false
+    for (let i = start; i < html.length; i++) {
+      const ch = html[i]
+      if (inStr) {
+        if (escaped) escaped = false
+        else if (ch === '\\') escaped = true
+        else if (ch === quote) inStr = false
+        continue
+      }
+      if (ch === '"' || ch === '\'') {
+        inStr = true
+        quote = ch
+      } else if (ch === '{') {
+        depth++
+      } else if (ch === '}') {
+        depth--
+        if (depth === 0) return html.slice(start, i + 1)
+      }
+    }
+    return null
+  }
+
+  /**
+   * 通用请求：经过 tlsclientwrapper（伪装 Chrome JA3 指纹）调用 GPTmail API。
+   *
+   * 关键：GPTmail 通过 TLS 指纹 + Referer/Origin/sec-ch-* 校验"是否真实 Chrome"，
+   * 用 Node 默认 TLS / undici 会被识破返回 401 {"error":"Browser session required"}。
+   * 此方法走 Registrar 的 SessionClient（伪装 chrome_146 JA3）并补全浏览器 headers，
+   * 才能通过 Cloudflare 反爬。
+   *
+   * 自动注入 x-inbox-token，并从响应里滚动更新 token。
+   */
+  private async request<T = Record<string, unknown>>(
+    path: string,
+    init: { method?: 'GET' | 'POST' | 'DELETE'; body?: string; withToken?: boolean; headers?: Record<string, string>; _retried?: boolean } = {}
+  ): Promise<T> {
+    const url = `${this.baseURL}${path}`
+    const origin = new URL(this.baseURL).origin
+    // Referer 跟官方抓包对齐：`https://mail.chatgpt.org.uk/<inboxEmail>`（不带 /zh/）
+    const referer = `${origin}/${this.inboxEmail || ''}`
+    const method: 'GET' | 'POST' | 'DELETE' = init.method ?? 'GET'
+
+    const headers: Record<string, string> = {
+      'accept': 'application/json, text/plain, */*',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'user-agent': GptMailService.UA,
+      'origin': origin,
+      'referer': referer,
+      'sec-ch-ua': GptMailService.SEC_CH_UA,
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-origin',
+      ...(init.headers || {})
+    }
+    if (init.body && !headers['content-type'] && !headers['Content-Type']) {
+      headers['content-type'] = 'application/json'
+    }
+    if ((init.withToken ?? true) && this.token) {
+      headers['x-inbox-token'] = this.token
+    }
+
+    // 走 tlsclientwrapper（伪装 Chrome 146 JA3 + 由 Registrar 的 sessionOpts 注入 UA/代理）
+    const session = this.getSession()
+    if (!session) throw new Error('GPTmail TLS SessionClient 不可用（可能正在重建，稍后重试）')
+    let raw: { status: number; body: string }
+    if (method === 'POST') {
+      raw = await session.post(url, init.body ?? '', { headers })
+    } else if (method === 'DELETE') {
+      raw = await session.delete(url, { headers })
+    } else {
+      raw = await session.get(url, { headers })
+    }
+
+    let data: unknown
+    try { data = JSON.parse(raw.body) } catch { data = raw.body }
+
+    // 401/403 且带 token：可能是滚动 token 过期 —— 重新从页面拿一次 token 后重试一次。
+    // （若是 TLS 指纹被识破的 "Browser session required"，重取也无害，最多再失败一次按原错误抛出）
+    if ((raw.status === 401 || raw.status === 403) && !init._retried && (init.withToken ?? true) && path !== '') {
+      try {
+        await this.fetchInitialTokenFromPage()
+        return await this.request<T>(path, { ...init, _retried: true })
+      } catch { /* 重取失败则按原错误抛出 */ }
+    }
+
+    if (raw.status < 200 || raw.status >= 300) {
+      const snippet = typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)
+      throw new Error(`GPTmail ${path} HTTP ${raw.status}: ${snippet}`)
+    }
+
+    if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>
+      const auth = obj.auth as Record<string, unknown> | undefined
+      const newToken = auth?.token
+      if (typeof newToken === 'string' && newToken) {
+        this.token = newToken
+      }
+    }
+    return data as T
+  }
+
+  async create(): Promise<string> {
+    // step 1: 生成「prefix@用户自建域名」作为注册站点提交的邮箱
+    const domain = this.domains[Math.floor(Math.random() * this.domains.length)]
+    const prefix = this.fixedPrefix || randomEmailPrefix()
+    this.address = `${prefix}@${domain}`
+
+    // step 2: 决定查询 GPTmail 时用哪个 inbox 邮箱
+    //   玩法 A（私有域名直收）：inboxEmail = address —— 注册地址本身就是 inbox（MX 已解析到 GPTmail）
+    //   玩法 B（CF 转发）：     inboxEmail = fixedInboxEmail —— 所有邮件转发到这个固定 inbox
+    this.inboxEmail = this.fixedInboxEmail || this.address
+
+    // step 3: GET 收件箱页面 https://mail.chatgpt.org.uk/<inboxEmail>，从 HTML 里解析
+    //   服务端 SSR 嵌入的 window.__BROWSER_AUTH（含初始 token）。
+    //   比 POST /api/inbox-token 更不容易触发反爬（那个 POST 端点会回 401 "Browser session required"）。
+    await this.fetchInitialTokenFromPage()
+    if (!this.token) {
+      throw new Error('GPTmail 从页面 HTML 解析 __BROWSER_AUTH.token 失败')
+    }
+
+    // step 4: 私有域名密码解锁（如果设了密码）—— 私有域名 inbox 在未 unlock 前查 emails 会返回 403
+    if (this.privatePassword) {
+      await this.unlockPrivateInbox()
+    }
+
+    // step 5: 记录 inbox 现有邮件 ID 作为基线，轮询时跳过这些旧邮件，避免历史验证码污染。
+    //   不再做全量 clear —— CF 转发模式下多个并发注册共享同一 inbox，
+    //   全量删除会误删别的任务待取的验证码。基线方案无副作用、并发安全。
+    try {
+      const existing = await this.fetchMails()
+      for (const mail of existing) {
+        const id = String(mail.id ?? '')
+        if (id) this.baselineIds.add(id)
+      }
+      if (this.baselineIds.size > 0) {
+        console.log(`[GPTmail] inbox 基线邮件数: ${this.baselineIds.size}（轮询时将跳过）`)
+      }
+    } catch { /* 基线获取失败不影响后续轮询 */ }
+
+    const mode = this.fixedInboxEmail
+      ? `CF 转发 → ${this.inboxEmail}`
+      : this.privatePassword ? '私有域名直收（已解锁）' : '私有域名直收（MX→GPTmail）'
+    if (this.domains.length > 1) {
+      console.log(`[GPTmail] 注册邮箱: ${this.address}  (域名池 ${this.domains.length} 个，模式: ${mode})`)
+    } else {
+      console.log(`[GPTmail] 注册邮箱: ${this.address}  (模式: ${mode})`)
+    }
+    return this.address
+  }
+
+  /**
+   * 通过 GET 页面 HTML 解析 window.__BROWSER_AUTH 初始 token。
+   * GPTmail 服务端会在 SSR 时把 `{token,email,expires_at}` 渲染到 HTML 的内联 script 里，
+   * 这是浏览器拿到 token 的"零成本"路径，不会触发 /api/inbox-token 的反爬保护。
+   */
+  private async fetchInitialTokenFromPage(): Promise<void> {
+    const origin = new URL(this.baseURL).origin
+    const pageUrl = `${origin}/${this.inboxEmail}`
+
+    const pageHeaders: Record<string, string> = {
+      'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'user-agent': GptMailService.UA,
+      'sec-ch-ua': GptMailService.SEC_CH_UA,
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest': 'document',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'none',
+      'sec-fetch-user': '?1',
+      'upgrade-insecure-requests': '1'
+    }
+
+    const session = this.getSession()
+    if (!session) throw new Error('GPTmail TLS SessionClient 不可用（可能正在重建，稍后重试）')
+    const raw = await session.get(pageUrl, { headers: pageHeaders })
+    if (raw.status < 200 || raw.status >= 300) {
+      throw new Error(`GPTmail GET ${pageUrl} HTTP ${raw.status}: ${raw.body.slice(0, 200)}`)
+    }
+
+    // 解析 window.__BROWSER_AUTH = { ... }；用括号配平扫描而非非贪婪正则，
+    // 避免对象出现嵌套 {} 时被 `\{[\s\S]*?\}` 提前截断导致 JSON 解析失败。
+    const jsonText = GptMailService.extractBrowserAuthJson(raw.body)
+    if (!jsonText) {
+      throw new Error('GPTmail 页面里未找到 window.__BROWSER_AUTH（服务器结构可能已变）')
+    }
+    let auth: Record<string, unknown>
+    try {
+      auth = JSON.parse(jsonText)
+    } catch (err) {
+      throw new Error(`GPTmail __BROWSER_AUTH JSON 解析失败: ${err instanceof Error ? err.message : err}`)
+    }
+    const token = typeof auth.token === 'string' ? auth.token : ''
+    if (!token) {
+      throw new Error(`GPTmail __BROWSER_AUTH 缺 token 字段: ${JSON.stringify(auth).slice(0, 200)}`)
+    }
+    this.token = token
+    console.log(`[GPTmail] 已从页面拿到初始 token（email=${auth.email}, exp=${auth.expires_at}）`)
+  }
+
+  /**
+   * 私有域名密码解锁。
+   * GPTmail 私有域名 inbox 在未 unlock 前调用 /api/emails 会返回 403 "private domain password required"。
+   * 必须先 POST /api/private-domains/unlock {email, password} 拿到 unlock 后的 token，再轮询邮件。
+   */
+  private async unlockPrivateInbox(): Promise<void> {
+    const lang = 'zh-CN' // 与 official frontend 默认一致
+    const resp = await this.request<Record<string, unknown>>(
+      `/api/private-domains/unlock?lang=${encodeURIComponent(lang)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ email: this.inboxEmail, password: this.privatePassword })
+      }
+    )
+    if (!resp.success) {
+      const err = (resp.error as string) || JSON.stringify(resp).slice(0, 200)
+      throw new Error(`GPTmail 私有域名解锁失败: ${err}（密码错误？域名未设为私有？）`)
+    }
+    console.log(`[GPTmail] 私有域名 inbox 解锁成功: ${this.inboxEmail}`)
+    // token 已被 request() 内部从 auth.token 自动滚动更新
+  }
+
+  getAddress(): string {
+    return this.address
+  }
+
+  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+    if (!this.address) throw new Error('GPTmail 注册邮箱为空，需先调用 create()')
+    if (!this.inboxEmail) throw new Error('GPTmail inbox 邮箱为空，需先调用 create()')
+    if (!this.token) throw new Error('GPTmail token 为空，需先调用 create()')
+
+    const maxRetries = Math.max(1, Math.floor(timeoutSec / intervalSec))
+    // 用 create() 时记录的基线 ID 初始化：跳过注册前就存在于 inbox 的旧邮件
+    const checkedIds = new Set<string>(this.baselineIds)
+    const userLocal = this.address.toLowerCase().split('@')[0]
+    // 私有域名直收模式下，inbox = address，所有邮件 to 必然是 address，严格匹配即可
+    const isPrivateDirect = !this.fixedInboxEmail
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (signal?.aborted) throw new Error('注册已取消')
+      await abortableSleep(intervalSec * 1000, signal)
+      try {
+        const mails = await this.fetchMails()
+        if (attempt === 1 || attempt % 5 === 0) {
+          console.log(`[GPTmail] [${attempt}/${maxRetries}] 收件箱(${this.inboxEmail}) 邮件数: ${mails.length}`)
+        }
+        for (const mail of mails) {
+          const id = String(mail.id ?? '')
+          if (!id || checkedIds.has(id)) continue
+          checkedIds.add(id)
+
+          const subject = String(mail.subject ?? '')
+          const content = String(mail.content ?? '')
+          const html = String(mail.html_content ?? mail.html ?? '')
+
+          if (isPrivateDirect) {
+            // 私有直收：inbox=address，email_address 必然匹配
+            const to = String(mail.email_address ?? '').toLowerCase()
+            if (to && to !== this.address.toLowerCase()) {
+              continue
+            }
+          } else {
+            // CF 转发：email_address=inbox，需要从 subject/body 软匹配本次注册地址，
+            //         避免拿到同一 inbox 其他注册的旧验证码
+            const blob = `${subject}\n${content}\n${html}`.toLowerCase()
+            const matches = blob.includes(this.address.toLowerCase()) || blob.includes(userLocal)
+            if (!matches) {
+              // 注意：subject/body 可能不含注册地址（部分服务只发"您的验证码"无邮箱回显），
+              //       此时若 inbox 里恰好只有这一封新邮件也可能是本次的 —— 但我们保守跳过避免误用
+              continue
+            }
+          }
+
+          const code = this.extractOTP(mail)
+          if (code) {
+            console.log(`[GPTmail] 提取到验证码: ${code} (from=${mail.from_address ?? ''}, subject=${subject.slice(0, 60)})`)
+            // 不再全量 clear inbox：CF 转发模式下多任务共享同一 inbox，
+            // 清空会误删别的任务待取的验证码。本次邮件已记入 checkedIds，
+            // 后续实例靠 create() 重新捕获基线跳过，已足够避免重复取码。
+            return code
+          }
+        }
+      } catch (err) {
+        if (attempt % 5 === 0) {
+          console.log(`[GPTmail] [${attempt}/${maxRetries}] 查询失败:`, err instanceof Error ? err.message : err)
+        }
+      }
+      if (attempt % 5 === 0) console.log(`[GPTmail] [${attempt}/${maxRetries}] 暂无验证码...`)
+    }
+    throw new Error(`GPTmail 等待验证码超时 (${timeoutSec}s)`)
+  }
+
+  private async fetchMails(): Promise<Array<Record<string, unknown>>> {
+    const url = `/api/emails?email=${encodeURIComponent(this.inboxEmail)}`
+    const resp = await this.request<Record<string, unknown>>(url)
+    if (!resp.success) return []
+    const data = resp.data as Record<string, unknown> | undefined
+    const arr = data?.emails
+    return Array.isArray(arr) ? (arr as Array<Record<string, unknown>>) : []
+  }
+
+  private extractOTP(mail: Record<string, unknown>): string {
+    // 1) 主题里直接含 6 位数字（"Your code is 123456" 类）
+    const subject = String(mail.subject ?? '')
+    const subjMatch = subject.match(/(\d{6})/)
+    if (subjMatch) return subjMatch[1]
+
+    // 2) 正文（content 是纯文本字段，HAR 里 AWS 验证码就在这里）
+    const content = String(mail.content ?? '')
+    const c1 = extractCode(content)
+    if (c1) return c1
+
+    // 3) HTML 兜底
+    const html = String(mail.html_content ?? mail.html ?? '')
     return extractCode(html)
   }
 }

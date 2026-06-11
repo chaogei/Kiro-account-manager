@@ -10,7 +10,7 @@ import { ChainProxyRelay } from '../registration/chainProxy'
 
 /**
  * 通过指定代理 URL 请求测试地址，返回延迟与出口 IP。
- * 仅支持 http/https 协议代理（受 undici ProxyAgent 限制；socks 协议会被 safeCreateProxyAgent 静默跳过）。
+ * 支持 http/https/socks4/socks5 协议代理（由 safeCreateProxyAgent 统一创建）。
  * 若给了 upstreamProxy，验活也走代理链（与注册流程一致），避免目标代理因来源 IP 不符被误标 dead。
  */
 function registerValidateHandler(): void {
@@ -37,7 +37,7 @@ function registerValidateHandler(): void {
     const agent = safeCreateProxyAgent(proxyForAgent)
     if (!agent) {
       if (chainRelay) await chainRelay.stop()
-      return { success: false, error: '代理协议不支持（仅支持 http/https）或 URL 无效' }
+      return { success: false, error: '代理协议不支持（仅支持 http/https/socks4/socks5）或 URL 无效' }
     }
 
     const controller = new AbortController()
@@ -84,6 +84,8 @@ function registerValidateHandler(): void {
       }
     } finally {
       clearTimeout(timer)
+      // 释放 agent 连接池：批量验活时不关闭会累积大量空闲连接/句柄直到 GC
+      try { await agent.close() } catch { /* ignore */ }
       if (chainRelay) await chainRelay.stop()
     }
   })
