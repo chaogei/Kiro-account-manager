@@ -1306,8 +1306,8 @@ const api = {
   },
 
   // Proton 邮箱：查询登录态（不弹窗）
-  protonLoginStatus: (proxy?: string): Promise<{ loggedIn: boolean }> => {
-    return ipcRenderer.invoke('proton-login-status', proxy)
+  protonLoginStatus: (proxy?: string, expectedEmail?: string): Promise<{ loggedIn: boolean; currentEmail?: string; emailMatch?: boolean }> => {
+    return ipcRenderer.invoke('proton-login-status', proxy, expectedEmail)
   },
 
   // Proton 邮箱：关闭窗口（保留登录态）
