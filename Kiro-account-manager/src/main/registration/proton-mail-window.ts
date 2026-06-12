@@ -255,7 +255,10 @@ interface ScanResult {
  * @param address 当前注册使用的收件地址（点号变体，原样含点）
  */
 function buildScanScript(address: string): string {
-  const addrFull = JSON.stringify(address.trim().toLowerCase())
+  // 点号归一化：Proton 邮箱忽略 local-part 中的点号，DOM 读到的收件人是去点的
+  // e.g. "Mi.meKasu.ga05@proton.me" → "mikasuga05@proton.me"
+  const [local, domain] = address.trim().toLowerCase().split('@')
+  const addrFull = JSON.stringify(local.replace(/\./g, '') + '@' + domain)
   return `(async () => {
     const addrFull = ${addrFull};
     const extractCode = (t) => { const m = (t||'').match(/\\b\\d{6}\\b/g); return m ? m[m.length-1] : ''; };
