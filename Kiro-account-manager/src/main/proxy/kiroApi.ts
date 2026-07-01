@@ -143,6 +143,20 @@ async function fetchWithProxy(url: string, options: RequestInit, account?: Proxy
   return await fetch(url, options)
 }
 
+function formatEndpointError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause
+    const suffix = cause ? `; cause=${formatEndpointError(cause)}` : ''
+    return `${error.name || 'Error'}: ${error.message}${suffix}`.slice(0, 1200)
+  }
+  if (typeof error === 'string') return error.slice(0, 1200)
+  try {
+    return JSON.stringify(error).slice(0, 1200)
+  } catch {
+    return String(error).slice(0, 1200)
+  }
+}
+
 // Kiro API 端点配置
 const KIRO_ENDPOINTS = [
   {
@@ -1203,7 +1217,7 @@ function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[
 
 // 获取排序后的端点列表（根据首选端点配置）
 function getSortedEndpoints(preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'): typeof KIRO_ENDPOINTS {
-  if (!preferredEndpoint) return KIRO_ENDPOINTS.filter(ep => ep.name !== 'AmazonQCLI')
+  if (!preferredEndpoint) return KIRO_ENDPOINTS
   
   // AmazonQ CLI 模式：只用这一个端点，失败不回退
   if (preferredEndpoint === 'amazonq-cli') {
@@ -1212,7 +1226,7 @@ function getSortedEndpoints(preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'a
   
   const preferredName = preferredEndpoint === 'codewhisperer' ? 'CodeWhisperer' : 'AmazonQ'
   
-  const sorted = KIRO_ENDPOINTS.filter(ep => ep.name !== 'AmazonQCLI')
+  const sorted = [...KIRO_ENDPOINTS]
   sorted.sort((a, b) => {
     if (a.name === preferredName) return -1
     if (b.name === preferredName) return 1
@@ -1305,8 +1319,12 @@ export async function callKiroApiStream(
         : await fetch(endpoint.url, { method: 'POST', headers, body: payloadStr, signal })
 
       if (response.status === 429) {
-        console.log(`[KiroAPI] Endpoint ${endpoint.name} quota exhausted, trying next...`)
-        lastError = new Error(`Quota exhausted on ${endpoint.name}`)
+        throwIfAborted(signal)
+        const body = await response.text().catch(() => '')
+        throwIfAborted(signal)
+        const detail = body ? `: ${body.slice(0, 500)}` : ''
+        console.log(`[KiroAPI] Endpoint ${endpoint.name} quota exhausted, trying next...`, body.slice(0, 500))
+        lastError = new Error(`Quota exhausted on ${endpoint.name}${detail}`)
         continue
       }
 
@@ -1335,7 +1353,7 @@ export async function callKiroApiStream(
         return
       }
       lastError = error as Error
-      console.error(`[KiroAPI] Endpoint ${endpoint.name} failed:`, error)
+      console.error(`[KiroAPI] Endpoint ${endpoint.name} failed:`, formatEndpointError(error))
       
       // 如果是认证错误，不继续尝试其他端点
       if ((error as Error).message.includes('Auth error')) {
@@ -2370,7 +2388,7 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
     return allModels
   } catch (error) {
     if (signal?.aborted) throw getAbortError(signal)
-    console.error('[KiroAPI] ListAvailableModels error:', error)
+    console.error('[KiroAPI] ListAvailableModels error:', formatEndpointError(error))
     return allModels.length > 0 ? allModels : []
   }
 }
