@@ -59,6 +59,9 @@ const api = {
       authMethod?: string
       accessToken?: string
       provider?: string
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
     }
   }>, concurrency?: number, syncInfo?: boolean): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
     return ipcRenderer.invoke('background-batch-refresh', accounts, concurrency, syncInfo)
@@ -98,6 +101,10 @@ const api = {
       region?: string
       authMethod?: string
       provider?: string
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
+      profileArn?: string
     }
     idp?: string
   }>, concurrency?: number): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
@@ -134,9 +141,12 @@ const api = {
     clientSecret: string
     region?: string
     startUrl?: string
-    authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise'
+    authMethod?: 'IdC' | 'social' | 'external_idp'
+    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise' | 'ExternalIdp' | 'IAM_SSO'
     profileArn?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
     accountId?: string
   }): Promise<{
     success: boolean
@@ -175,6 +185,8 @@ const api = {
     profileArn?: string
     provider?: string
     scopes?: string[]
+    tokenEndpoint?: string
+    issuerUrl?: string
   }): Promise<{ success: boolean; error?: string; dbPath?: string }> => {
     return ipcRenderer.invoke('switch-account-cli', credentials)
   },
@@ -200,8 +212,12 @@ const api = {
     clientId: string
     clientSecret: string
     region?: string
-    authMethod?: string  // 'IdC' 或 'social'
-    provider?: string    // 'BuilderId', 'Github', 'Google'
+    authMethod?: string
+    provider?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
+    profileArn?: string
   }): Promise<{
     success: boolean
     data?: {
@@ -246,6 +262,10 @@ const api = {
       region: string
       authMethod: string  // 'IdC' 或 'social'
       provider: string    // 'BuilderId', 'Github', 'Google'
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
+      profileArn?: string
     }
     error?: string
   }> => {
@@ -699,7 +719,7 @@ const api = {
   },
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string; tokenEndpoint?: string; issuerUrl?: string; scopes?: string }): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-add-account', account)
   },
 
@@ -709,7 +729,7 @@ const api = {
   },
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string; tokenEndpoint?: string; issuerUrl?: string; scopes?: string }>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-sync-accounts', accounts)
   },
 

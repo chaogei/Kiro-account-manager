@@ -76,7 +76,7 @@ export function resolveProfileArnForWrite(input: {
     return KIRO_SOCIAL_PROFILE_ARN
   }
   // Enterprise 不能用 BuilderId 占位符（IDE 调接口会 Invalid token）
-  if (input.provider === 'Enterprise' || input.authMethod === 'external_idp') {
+  if (input.provider === 'Enterprise' || input.provider === 'ExternalIdp' || input.authMethod === 'external_idp') {
     return getEnterpriseFallbackArn(input.region)
   }
   return KIRO_BUILDER_ID_PLACEHOLDER_ARN
@@ -98,7 +98,7 @@ export interface WriteKiroAuthTokenInput {
   refreshToken: string
   /** ISO 字符串。建议用 OIDC 返回的真实 expiresIn 算 */
   expiresAtIso: string
-  authMethod: 'IdC' | 'social'
+  authMethod: 'IdC' | 'social' | 'external_idp'
   provider: string
   region?: string
   startUrl?: string
@@ -106,6 +106,9 @@ export interface WriteKiroAuthTokenInput {
   clientId?: string
   clientSecret?: string
   profileArn?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
 }
 
 export interface WriteKiroAuthTokenResult {
@@ -134,7 +137,20 @@ export async function writeKiroAuthTokenFile(
   const clientIdHash = computeClientIdHash(input.startUrl)
 
   const tokenData: Record<string, unknown> =
-    input.authMethod === 'social'
+    input.authMethod === 'external_idp'
+      ? {
+          accessToken: input.accessToken,
+          authMethod: 'external_idp',
+          clientId: input.clientId,
+          expiresAt: input.expiresAtIso,
+          issuerUrl: input.issuerUrl,
+          provider: input.provider || 'ExternalIdp',
+          refreshToken: input.refreshToken,
+          scopes: input.scopes,
+          tokenEndpoint: input.tokenEndpoint,
+          profileArn: input.profileArn
+        }
+      : input.authMethod === 'social'
       ? {
           accessToken: input.accessToken,
           refreshToken: input.refreshToken,
@@ -165,7 +181,7 @@ export async function writeKiroAuthTokenFile(
   }
 
   let clientRegPath: string | undefined
-  if (input.authMethod !== 'social' && input.clientId && input.clientSecret) {
+  if (input.authMethod !== 'social' && input.authMethod !== 'external_idp' && input.clientId && input.clientSecret) {
     clientRegPath = path.join(KIRO_SSO_CACHE_DIR, `${clientIdHash}.json`)
     // IDE 客户端注册有效期 90 天（Kiro IDE 原版做法），格式为去掉 Z 的 ISO 字符串
     const clientExpiresAt = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().replace('Z', '')

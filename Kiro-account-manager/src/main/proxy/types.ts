@@ -389,6 +389,9 @@ export interface ProxyAccount {
   authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'
   provider?: string
   profileArn?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
   expiresAt?: number
   machineId?: string  // 账户绑定的设备 ID（64位十六进制）
   /** 账号绑定的出口代理 URL（http/https）；为空则使用全局代理逻辑 */

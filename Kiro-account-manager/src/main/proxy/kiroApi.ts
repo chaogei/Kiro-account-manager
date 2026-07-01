@@ -224,7 +224,7 @@ function resolveProfileArn(account: ProxyAccount): string | undefined {
   if (account.profileArn && !isPlaceholderProfileArn(account.profileArn)) {
     return account.profileArn
   }
-  if (account.provider === 'Enterprise' || account.authMethod === 'external_idp') {
+  if (account.provider === 'Enterprise' || account.provider === 'ExternalIdp' || account.authMethod === 'external_idp') {
     return getEnterpriseFallbackArn(account.region)
   }
   if (account.authMethod === 'social' || account.provider === 'Github' || account.provider === 'Google') {
@@ -2266,6 +2266,9 @@ export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=1'
   }
+  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
+    headers['TokenType'] = 'EXTERNAL_IDP'
+  }
 
   // 获取该账号类型对应的备用 ARN（403 时兜底，避免每次请求都重复尝试）
   const fallbackArn = resolveProfileArn(account)
@@ -2324,7 +2327,7 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   let nextToken: string | undefined
 
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底）
-  const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
+  const isEnterprise = account.provider === 'Enterprise' || account.provider === 'ExternalIdp' || account.authMethod === 'external_idp'
   if (!account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
     if (fetchedArn) {

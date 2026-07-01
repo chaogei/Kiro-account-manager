@@ -217,7 +217,11 @@ export const AccountCard = memo(function AccountCard({
       alert(isEn ? 'Incomplete credentials, cannot switch' : '账号凭证不完整，无法切换')
       return
     }
-    if (credentials.authMethod !== 'social' && (!credentials.clientId || !credentials.clientSecret)) {
+    if (credentials.authMethod === 'external_idp' && (!credentials.clientId || !credentials.tokenEndpoint)) {
+      alert(isEn ? 'Incomplete credentials, cannot switch' : '账号凭证不完整，无法切换')
+      return
+    }
+    if (credentials.authMethod !== 'social' && credentials.authMethod !== 'external_idp' && (!credentials.clientId || !credentials.clientSecret)) {
       alert(isEn ? 'Incomplete credentials, cannot switch' : '账号凭证不完整，无法切换')
       return
     }
@@ -229,7 +233,10 @@ export const AccountCard = memo(function AccountCard({
       clientSecret: credentials.clientSecret,
       region: credentials.region || 'us-east-1',
       profileArn: account.profileArn,
-      provider: credentials.provider
+      provider: credentials.provider,
+      tokenEndpoint: credentials.tokenEndpoint,
+      issuerUrl: credentials.issuerUrl,
+      scopes: credentials.scopes ? credentials.scopes.split(/\s+/).filter(Boolean) : undefined
     }
     const idePayload = {
       accessToken: credentials.accessToken,
@@ -241,6 +248,9 @@ export const AccountCard = memo(function AccountCard({
       authMethod: credentials.authMethod,
       provider: credentials.provider,
       profileArn: account.profileArn,
+      tokenEndpoint: credentials.tokenEndpoint,
+      issuerUrl: credentials.issuerUrl,
+      scopes: credentials.scopes,
       accountId: account.id
     }
 
@@ -1059,5 +1069,4 @@ export const AccountCard = memo(function AccountCard({
     </Card>
   )
 })
-
 

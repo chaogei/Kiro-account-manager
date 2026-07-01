@@ -73,6 +73,159 @@ let _statsCache: {
   output: AccountStats
 } | null = null
 
+let localSsoSyncInFlight: Promise<void> | null = null
+
+function normalizeIdentityPart(value?: string): string {
+  return (value || '').trim().toLowerCase()
+}
+
+function getAccountDedupKeys(account: Account): string[] {
+  const provider = account.credentials.provider || account.idp
+  const keys: string[] = []
+  const userId = normalizeIdentityPart(account.userId)
+  const email = normalizeIdentityPart(account.email)
+  const profileArn = normalizeIdentityPart(account.profileArn || account.credentials.profileArn)
+  const clientId = normalizeIdentityPart(account.credentials.clientId)
+  const issuerUrl = normalizeIdentityPart(account.credentials.issuerUrl)
+  const tokenEndpoint = normalizeIdentityPart(account.credentials.tokenEndpoint)
+
+  if (userId) keys.push(`${provider}:user:${userId}`)
+  if (provider === 'ExternalIdp' || account.credentials.authMethod === 'external_idp') {
+    if (profileArn) keys.push(`ExternalIdp:profile:${profileArn}`)
+    if (clientId && issuerUrl) keys.push(`ExternalIdp:client-issuer:${clientId}:${issuerUrl}`)
+    if (clientId && tokenEndpoint) keys.push(`ExternalIdp:client-token:${clientId}:${tokenEndpoint}`)
+  }
+  if (email) keys.push(`${provider}:email:${email}`)
+  return keys
+}
+
+function findMatchingAccountId(
+  accounts: Map<string, Account>,
+  candidate: {
+    email?: string
+    userId?: string
+    provider?: string
+    authMethod?: string
+    clientId?: string
+    profileArn?: string
+    issuerUrl?: string
+    tokenEndpoint?: string
+  }
+): string | null {
+  const candidateAccount = {
+    id: '__candidate__',
+    email: candidate.email || '',
+    userId: candidate.userId,
+    idp: (candidate.provider || 'BuilderId') as IdpType,
+    profileArn: candidate.profileArn,
+    credentials: {
+      accessToken: '',
+      csrfToken: '',
+      expiresAt: 0,
+      authMethod: candidate.authMethod as Account['credentials']['authMethod'],
+      provider: candidate.provider as Account['credentials']['provider'],
+      clientId: candidate.clientId,
+      profileArn: candidate.profileArn,
+      issuerUrl: candidate.issuerUrl,
+      tokenEndpoint: candidate.tokenEndpoint
+    },
+    subscription: { type: 'Free' as SubscriptionType },
+    usage: { current: 0, limit: 0, percentUsed: 0, lastUpdated: 0 },
+    tags: [],
+    status: 'unknown' as AccountStatus,
+    isActive: false,
+    createdAt: 0,
+    lastUsedAt: 0
+  } satisfies Account
+
+  const candidateKeys = new Set(getAccountDedupKeys(candidateAccount))
+  if (candidateKeys.size === 0) return null
+
+  for (const [id, account] of accounts) {
+    if (getAccountDedupKeys(account).some((key) => candidateKeys.has(key))) {
+      return id
+    }
+  }
+  return null
+}
+
+function mergeDuplicateAccounts(
+  inputAccounts: Map<string, Account>,
+  inputActiveAccountId: string | null
+): { accounts: Map<string, Account>; activeAccountId: string | null; changed: boolean } {
+  const accounts = new Map(inputAccounts)
+  const keyOwner = new Map<string, string>()
+  let activeAccountId = inputActiveAccountId
+  let changed = false
+
+  const preferFirst = (first: Account, second: Account): boolean => {
+    if (first.id === activeAccountId) return true
+    if (second.id === activeAccountId) return false
+    const firstExpiry = first.credentials.expiresAt || 0
+    const secondExpiry = second.credentials.expiresAt || 0
+    if (firstExpiry !== secondExpiry) return firstExpiry > secondExpiry
+    return (first.lastUsedAt || first.createdAt || 0) >= (second.lastUsedAt || second.createdAt || 0)
+  }
+
+  const mergeAccountData = (primary: Account, duplicate: Account): Account => ({
+    ...duplicate,
+    ...primary,
+    id: primary.id,
+    email: primary.email || duplicate.email,
+    userId: primary.userId || duplicate.userId,
+    nickname: primary.nickname || duplicate.nickname,
+    profileArn: primary.profileArn || duplicate.profileArn,
+    machineId: primary.machineId || duplicate.machineId,
+    credentials: {
+      ...duplicate.credentials,
+      ...primary.credentials,
+      accessToken: primary.credentials.accessToken || duplicate.credentials.accessToken,
+      refreshToken: primary.credentials.refreshToken || duplicate.credentials.refreshToken,
+      profileArn: primary.credentials.profileArn || duplicate.credentials.profileArn,
+      tokenEndpoint: primary.credentials.tokenEndpoint || duplicate.credentials.tokenEndpoint,
+      issuerUrl: primary.credentials.issuerUrl || duplicate.credentials.issuerUrl,
+      scopes: primary.credentials.scopes || duplicate.credentials.scopes,
+      expiresAt: Math.max(primary.credentials.expiresAt || 0, duplicate.credentials.expiresAt || 0)
+    },
+    tags: Array.from(new Set([...(duplicate.tags || []), ...(primary.tags || [])])),
+    isActive: primary.isActive || duplicate.isActive || primary.id === activeAccountId || duplicate.id === activeAccountId,
+    createdAt: Math.min(primary.createdAt || Date.now(), duplicate.createdAt || Date.now()),
+    lastUsedAt: Math.max(primary.lastUsedAt || 0, duplicate.lastUsedAt || 0)
+  })
+
+  for (const [id, account] of Array.from(accounts)) {
+    if (!accounts.has(id)) continue
+    for (const key of getAccountDedupKeys(account)) {
+      const existingId = keyOwner.get(key)
+      if (!existingId || !accounts.has(existingId)) {
+        keyOwner.set(key, id)
+        continue
+      }
+
+      const existing = accounts.get(existingId)!
+      const keepExisting = preferFirst(existing, account)
+      const keepId = keepExisting ? existingId : id
+      const removeId = keepExisting ? id : existingId
+      const merged = keepExisting ? mergeAccountData(existing, account) : mergeAccountData(account, existing)
+
+      accounts.set(keepId, merged)
+      accounts.delete(removeId)
+      if (activeAccountId === removeId) activeAccountId = keepId
+      for (const mergedKey of getAccountDedupKeys(merged)) keyOwner.set(mergedKey, keepId)
+      changed = true
+      break
+    }
+  }
+
+  if (changed && activeAccountId) {
+    for (const [id, account] of accounts) {
+      accounts.set(id, { ...account, isActive: id === activeAccountId })
+    }
+  }
+
+  return { accounts, activeAccountId, changed }
+}
+
 /**
  * 异步同步本地 SSO 缓存中的激活账号到 store。
  * 含潜在的网络请求（verifyAccountCredentials），从 loadFromStorage 中拆出来
@@ -88,6 +241,9 @@ async function syncLocalSsoAccountAsync(
   get: () => AccountsStore,
   set: SetFn
 ): Promise<void> {
+  if (localSsoSyncInFlight) return localSsoSyncInFlight
+
+  localSsoSyncInFlight = (async (): Promise<void> => {
   try {
     const localResult = await window.api.getLocalActiveAccount()
     if (!localResult.success || !localResult.data?.refreshToken) return
@@ -134,54 +290,149 @@ async function syncLocalSsoAccountAsync(
       clientSecret: importResult.data.clientSecret || '',
       region: importResult.data.region,
       authMethod: importResult.data.authMethod,
-      provider: importResult.data.provider
+      provider: importResult.data.provider,
+      tokenEndpoint: importResult.data.tokenEndpoint,
+      issuerUrl: importResult.data.issuerUrl,
+      scopes: importResult.data.scopes,
+      profileArn: importResult.data.profileArn
     })
     if (!verifyResult.success || !verifyResult.data) return
 
+    const imported = importResult.data
+    const verified = verifyResult.data
     const now = Date.now()
-    const newId = `${verifyResult.data.email}-${now}`
+    const provider = imported.provider || 'BuilderId'
+    const existingAccountId = findMatchingAccountId(get().accounts, {
+      email: verified.email,
+      userId: verified.userId,
+      provider,
+      authMethod: imported.authMethod,
+      clientId: imported.clientId,
+      profileArn: verified.profileArn || imported.profileArn,
+      issuerUrl: imported.issuerUrl,
+      tokenEndpoint: imported.tokenEndpoint
+    })
+
+    if (existingAccountId) {
+      set((state) => {
+        const accounts = new Map(state.accounts)
+        for (const [id, account] of accounts) {
+          if (id !== existingAccountId && account.isActive) {
+            accounts.set(id, { ...account, isActive: false })
+          }
+        }
+
+        const existing = accounts.get(existingAccountId)
+        if (existing) {
+          accounts.set(existingAccountId, {
+            ...existing,
+            email: existing.email || verified.email,
+            userId: existing.userId || verified.userId,
+            nickname: existing.nickname || (verified.email ? verified.email.split('@')[0] : undefined),
+            idp: provider as IdpType,
+            profileArn: verified.profileArn || imported.profileArn || existing.profileArn,
+            credentials: {
+              ...existing.credentials,
+              accessToken: verified.accessToken,
+              refreshToken: verified.refreshToken,
+              clientId: imported.clientId || existing.credentials.clientId,
+              clientSecret: imported.clientSecret || existing.credentials.clientSecret || '',
+              region: imported.region || existing.credentials.region || 'us-east-1',
+              expiresAt: verified.expiresIn ? now + verified.expiresIn * 1000 : now + 3600 * 1000,
+              authMethod: imported.authMethod as 'IdC' | 'social' | 'external_idp',
+              provider: provider as 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google',
+              profileArn: verified.profileArn || imported.profileArn || existing.credentials.profileArn,
+              tokenEndpoint: imported.tokenEndpoint || existing.credentials.tokenEndpoint,
+              issuerUrl: imported.issuerUrl || existing.credentials.issuerUrl,
+              scopes: imported.scopes || existing.credentials.scopes
+            },
+            subscription: {
+              type: verified.subscriptionType as SubscriptionType,
+              title: verified.subscriptionTitle,
+              rawType: verified.subscription?.rawType,
+              daysRemaining: verified.daysRemaining,
+              expiresAt: verified.expiresAt,
+              managementTarget: verified.subscription?.managementTarget,
+              upgradeCapability: verified.subscription?.upgradeCapability,
+              overageCapability: verified.subscription?.overageCapability
+            },
+            usage: {
+              current: verified.usage.current,
+              limit: verified.usage.limit,
+              percentUsed: verified.usage.limit > 0
+                ? verified.usage.current / verified.usage.limit
+                : 0,
+              lastUpdated: now,
+              baseLimit: verified.usage.baseLimit,
+              baseCurrent: verified.usage.baseCurrent,
+              freeTrialLimit: verified.usage.freeTrialLimit,
+              freeTrialCurrent: verified.usage.freeTrialCurrent,
+              freeTrialExpiry: verified.usage.freeTrialExpiry,
+              bonuses: verified.usage.bonuses,
+              nextResetDate: verified.usage.nextResetDate,
+              resourceDetail: verified.usage.resourceDetail
+            },
+            status: 'active',
+            lastUsedAt: now,
+            isActive: true
+          })
+        }
+        return { accounts, activeAccountId: existingAccountId }
+      })
+      console.log('[Store] Updated existing local SSO account:', existingAccountId)
+      get().saveToStorage()
+      return
+    }
+
+    const newIdBase = verified.email || verified.userId || imported.clientId || 'local-kiro-account'
+    const newId = `${newIdBase}-${now}`
     const newAccount: Account = {
       id: newId,
-      email: verifyResult.data.email,
-      userId: verifyResult.data.userId,
-      nickname: verifyResult.data.email ? verifyResult.data.email.split('@')[0] : undefined,
-      idp: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Google' | 'Github',
+      email: verified.email,
+      userId: verified.userId,
+      nickname: verified.email ? verified.email.split('@')[0] : undefined,
+      idp: provider as IdpType,
+      profileArn: verified.profileArn || imported.profileArn,
       credentials: {
-        accessToken: verifyResult.data.accessToken,
+        accessToken: verified.accessToken,
         csrfToken: '',
-        refreshToken: verifyResult.data.refreshToken,
-        clientId: importResult.data.clientId || '',
-        clientSecret: importResult.data.clientSecret || '',
-        region: importResult.data.region || 'us-east-1',
-        expiresAt: verifyResult.data.expiresIn ? now + verifyResult.data.expiresIn * 1000 : now + 3600 * 1000,
-        authMethod: importResult.data.authMethod as 'IdC' | 'social',
-        provider: (importResult.data.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+        refreshToken: verified.refreshToken,
+        clientId: imported.clientId || '',
+        clientSecret: imported.clientSecret || '',
+        region: imported.region || 'us-east-1',
+        expiresAt: verified.expiresIn ? now + verified.expiresIn * 1000 : now + 3600 * 1000,
+        authMethod: imported.authMethod as 'IdC' | 'social' | 'external_idp',
+        provider: provider as 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google',
+        profileArn: verified.profileArn || imported.profileArn,
+        tokenEndpoint: imported.tokenEndpoint,
+        issuerUrl: imported.issuerUrl,
+        scopes: imported.scopes
       },
       subscription: {
-        type: verifyResult.data.subscriptionType as SubscriptionType,
-        title: verifyResult.data.subscriptionTitle,
-        rawType: verifyResult.data.subscription?.rawType,
-        daysRemaining: verifyResult.data.daysRemaining,
-        expiresAt: verifyResult.data.expiresAt,
-        managementTarget: verifyResult.data.subscription?.managementTarget,
-        upgradeCapability: verifyResult.data.subscription?.upgradeCapability,
-        overageCapability: verifyResult.data.subscription?.overageCapability
+        type: verified.subscriptionType as SubscriptionType,
+        title: verified.subscriptionTitle,
+        rawType: verified.subscription?.rawType,
+        daysRemaining: verified.daysRemaining,
+        expiresAt: verified.expiresAt,
+        managementTarget: verified.subscription?.managementTarget,
+        upgradeCapability: verified.subscription?.upgradeCapability,
+        overageCapability: verified.subscription?.overageCapability
       },
       usage: {
-        current: verifyResult.data.usage.current,
-        limit: verifyResult.data.usage.limit,
-        percentUsed: verifyResult.data.usage.limit > 0
-          ? verifyResult.data.usage.current / verifyResult.data.usage.limit
+        current: verified.usage.current,
+        limit: verified.usage.limit,
+        percentUsed: verified.usage.limit > 0
+          ? verified.usage.current / verified.usage.limit
           : 0,
         lastUpdated: now,
-        baseLimit: verifyResult.data.usage.baseLimit,
-        baseCurrent: verifyResult.data.usage.baseCurrent,
-        freeTrialLimit: verifyResult.data.usage.freeTrialLimit,
-        freeTrialCurrent: verifyResult.data.usage.freeTrialCurrent,
-        freeTrialExpiry: verifyResult.data.usage.freeTrialExpiry,
-        bonuses: verifyResult.data.usage.bonuses,
-        nextResetDate: verifyResult.data.usage.nextResetDate,
-        resourceDetail: verifyResult.data.usage.resourceDetail
+        baseLimit: verified.usage.baseLimit,
+        baseCurrent: verified.usage.baseCurrent,
+        freeTrialLimit: verified.usage.freeTrialLimit,
+        freeTrialCurrent: verified.usage.freeTrialCurrent,
+        freeTrialExpiry: verified.usage.freeTrialExpiry,
+        bonuses: verified.usage.bonuses,
+        nextResetDate: verified.usage.nextResetDate,
+        resourceDetail: verified.usage.resourceDetail
       },
       status: 'active',
       createdAt: now,
@@ -201,10 +452,17 @@ async function syncLocalSsoAccountAsync(
       accounts.set(newId, newAccount)
       return { accounts, activeAccountId: newId }
     })
-    console.log('[Store] Auto-imported account from local SSO cache:', verifyResult.data.email)
+    console.log('[Store] Auto-imported account from local SSO cache:', verified.email)
     get().saveToStorage()
   } catch (e) {
     console.warn('[Store] Failed to sync local active account:', e)
+  }
+  })()
+
+  try {
+    await localSsoSyncInFlight
+  } finally {
+    localSsoSyncInFlight = null
   }
 }
 
@@ -1408,6 +1666,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         provider?: string
         profileArn?: string
+        tokenEndpoint?: string
+        issuerUrl?: string
+        scopes?: string
       }
     }> = []
 
@@ -1427,7 +1688,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           authMethod: account.credentials.authMethod,
           accessToken: account.credentials.accessToken,
           provider: account.credentials.provider || account.idp,
-          profileArn: account.credentials.profileArn
+          profileArn: account.credentials.profileArn,
+          tokenEndpoint: account.credentials.tokenEndpoint,
+          issuerUrl: account.credentials.issuerUrl,
+          scopes: account.credentials.scopes
         }
       })
     }
@@ -1564,6 +1828,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         region?: string
         authMethod?: string
         provider?: string
+        tokenEndpoint?: string
+        issuerUrl?: string
+        scopes?: string
+        profileArn?: string
       }
       idp?: string
     }> = []
@@ -1582,7 +1850,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
           authMethod: account.credentials.authMethod,
-          provider: account.credentials.provider
+          provider: account.credentials.provider,
+          tokenEndpoint: account.credentials.tokenEndpoint,
+          issuerUrl: account.credentials.issuerUrl,
+          scopes: account.credentials.scopes,
+          profileArn: account.credentials.profileArn
         },
         idp: account.idp
       })
@@ -1639,7 +1911,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         Enterprise: 0,
         AWSIdC: 0,
         Internal: 0,
-        IAM_SSO: 0
+        IAM_SSO: 0,
+        ExternalIdp: 0
       },
       activeCount: 0,
       expiringSoonCount: 0,
@@ -1679,11 +1952,17 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const data = await window.api.loadAccounts()
 
       if (data) {
-        const accounts = new Map(Object.entries(data.accounts ?? {}) as [string, Account][])
-        const activeAccountId = data.activeAccountId ?? null
+        let accounts = new Map(Object.entries(data.accounts ?? {}) as [string, Account][])
+        let activeAccountId = data.activeAccountId ?? null
+        const deduped = mergeDuplicateAccounts(accounts, activeAccountId)
+        accounts = deduped.accounts
+        activeAccountId = deduped.activeAccountId
+        if (deduped.changed) {
+          console.log('[Store] Merged duplicate accounts after local Kiro import')
+        }
 
         // 为没有 machineId 的现有账户生成一个
-        let needsSave = false
+        let needsSave = deduped.changed
         for (const [id, account] of accounts) {
           if (!account.machineId) {
             account.machineId = generateRandomMachineId()
@@ -2174,6 +2453,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             authMethod: creds.authMethod,
             provider: creds.provider,
             profileArn: (availableAccount as { profileArn?: string }).profileArn,
+            tokenEndpoint: creds.tokenEndpoint,
+            issuerUrl: creds.issuerUrl,
+            scopes: creds.scopes,
             accountId: availableAccount.id
           })
           // 把 main 进程 refresh 后的最新 credentials 同步回 store，
@@ -2207,7 +2489,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             clientSecret: creds.clientSecret,
             region: creds.region || 'us-east-1',
             profileArn: (availableAccount as { profileArn?: string }).profileArn,
-            provider: creds.provider
+            provider: creds.provider,
+            tokenEndpoint: creds.tokenEndpoint,
+            issuerUrl: creds.issuerUrl,
+            scopes: creds.scopes ? creds.scopes.split(/\s+/).filter(Boolean) : undefined
           }).catch(err => console.warn('[AutoSwitch CLI] Failed:', err))
         }
       } else {
@@ -2396,6 +2681,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         provider?: string
         profileArn?: string
+        tokenEndpoint?: string
+        issuerUrl?: string
+        scopes?: string
       }
     }> = []
     
@@ -2426,7 +2714,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             authMethod: account.credentials.authMethod,
             accessToken: account.credentials.accessToken,
             provider: account.credentials.provider,
-            profileArn: account.credentials.profileArn
+            profileArn: account.credentials.profileArn,
+            tokenEndpoint: account.credentials.tokenEndpoint,
+            issuerUrl: account.credentials.issuerUrl,
+            scopes: account.credentials.scopes
           }
         })
       }
