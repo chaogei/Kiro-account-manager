@@ -161,6 +161,9 @@ interface KiroApi {
       authMethod?: string
       accessToken?: string
       provider?: string
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
     }
   }>, concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
   onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
@@ -178,6 +181,10 @@ interface KiroApi {
       region?: string
       authMethod?: string
       provider?: string
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
+      profileArn?: string
     }
     idp?: string
   }>, concurrency?: number) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
@@ -192,9 +199,12 @@ interface KiroApi {
     clientSecret: string
     region?: string
     startUrl?: string
-    authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'
+    authMethod?: 'IdC' | 'social' | 'external_idp'
+    provider?: 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google' | 'IAM_SSO'
     profileArn?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
     /** 反代 store 里的 account.id，用于 main 进程记忆 lastSwitchedAccountId 供 watcher 反向同步 */
     accountId?: string
   }) => Promise<{
@@ -244,6 +254,8 @@ interface KiroApi {
     profileArn?: string
     provider?: string
     scopes?: string[]
+    tokenEndpoint?: string
+    issuerUrl?: string
   }) => Promise<{ success: boolean; error?: string; dbPath?: string }>
 
   // 退出登录 - 清除本地 SSO 缓存
@@ -259,8 +271,12 @@ interface KiroApi {
     clientId: string
     clientSecret: string
     region?: string
-    authMethod?: string  // 'IdC' 或 'social'
-    provider?: string    // 'BuilderId', 'Github', 'Google'
+    authMethod?: string
+    provider?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
+    profileArn?: string
   }) => Promise<{
     success: boolean
     data?: {
@@ -328,6 +344,10 @@ interface KiroApi {
       region: string
       authMethod: string  // 'IdC' 或 'social'
       provider: string    // 'BuilderId', 'Github', 'Google'
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
+      profileArn?: string
     }
     error?: string
   }>
@@ -636,13 +656,13 @@ interface KiroApi {
   onProxyWebhookTrigger: (callback: (event: string, payload: Record<string, unknown>) => void) => (() => void)
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string; tokenEndpoint?: string; issuerUrl?: string; scopes?: string }) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 从反代池移除账号
   proxyRemoveAccount: (accountId: string) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string; tokenEndpoint?: string; issuerUrl?: string; scopes?: string }>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 获取反代池账号列表
   proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>

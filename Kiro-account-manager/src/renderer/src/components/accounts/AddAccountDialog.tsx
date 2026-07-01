@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { SubscriptionType } from '@/types/account'
+import type { IdpType, SubscriptionType } from '@/types/account'
 import { X, Loader2, Download, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
 
@@ -60,6 +60,69 @@ interface VerifiedData {
 type ImportMode = 'oidc' | 'sso' | 'login'
 type LoginType = 'builderid' | 'google' | 'github' | 'iamsso'
 
+type ImportCredential = {
+  _email?: string
+  _userId?: string
+  accessToken?: string
+  refreshToken: string
+  password?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authMethod?: 'IdC' | 'social' | 'external_idp'
+  provider?: string
+  profileArn?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
+}
+
+const normalizeProfileArn = (value?: unknown): string | undefined => {
+  const arn = typeof value === 'string' ? value.trim() : ''
+  return arn.startsWith('arn:aws:codewhisperer:') ? arn : undefined
+}
+
+const regionFromProfileArn = (arn?: string): string | undefined => {
+  const parts = arn?.split(':')
+  return parts && parts.length > 3 ? parts[3] : undefined
+}
+
+const normalizeImportedCredential = (raw: unknown): ImportCredential => {
+  const source = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const auth = ((source.kiro_auth_token_raw && typeof source.kiro_auth_token_raw === 'object')
+    ? source.kiro_auth_token_raw
+    : source) as Record<string, unknown>
+  const profile = ((source.kiro_profile_raw && typeof source.kiro_profile_raw === 'object')
+    ? source.kiro_profile_raw
+    : {}) as Record<string, unknown>
+
+  const provider = String(source.provider || source.login_provider || auth.provider || 'BuilderId')
+  const authMethodRaw = String(source.authMethod || source.auth_method || auth.authMethod || auth.auth_method || '')
+  const authMethod = (authMethodRaw || (provider === 'ExternalIdp' ? 'external_idp' : provider === 'Github' || provider === 'Google' ? 'social' : 'IdC')) as ImportCredential['authMethod']
+  const profileArn = normalizeProfileArn(source.profileArn || source.profile_arn || auth.profileArn || auth.profile_arn || profile.arn)
+  const refreshToken = String(source.refreshToken || source.refresh_token || auth.refreshToken || auth.refresh_token || '')
+  const clientId = String(source.clientId || source.client_id || auth.clientId || auth.client_id || '')
+  const scopesValue = source.scopes || source.scope || auth.scopes || auth.scope
+  const scopes = Array.isArray(scopesValue) ? scopesValue.map(String).join(' ') : String(scopesValue || '')
+
+  return {
+    _email: String(source.email || source.login_hint || auth.loginHint || ''),
+    _userId: String(source.userId || source.user_id || ''),
+    accessToken: String(source.accessToken || source.access_token || auth.accessToken || auth.access_token || ''),
+    refreshToken,
+    password: typeof source.password === 'string' ? source.password : undefined,
+    clientId,
+    clientSecret: String(source.clientSecret || source.client_secret || auth.clientSecret || auth.client_secret || ''),
+    region: String(source.region || auth.region || regionFromProfileArn(profileArn) || 'us-east-1'),
+    authMethod,
+    provider,
+    profileArn,
+    tokenEndpoint: String(source.tokenEndpoint || source.token_endpoint || auth.tokenEndpoint || auth.token_endpoint || ''),
+    issuerUrl: String(source.issuerUrl || source.issuer_url || auth.issuerUrl || auth.issuer_url || source.issuer_url || ''),
+    scopes
+  }
+}
+
 export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): React.ReactNode {
   const { addAccount, accounts, batchImportConcurrency, loginPrivateMode, groups, activeGroupTab } = useAccountsStore()
 
@@ -86,8 +149,12 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [region, setRegion] = useState('us-east-1')
-  const [authMethod, setAuthMethod] = useState<'IdC' | 'social'>('IdC')
-  const [provider, setProvider] = useState('BuilderId')  // 'BuilderId', 'Enterprise', 'Github', 'Google'
+  const [authMethod, setAuthMethod] = useState<'IdC' | 'social' | 'external_idp'>('IdC')
+  const [provider, setProvider] = useState('BuilderId')  // 'BuilderId', 'Enterprise', 'ExternalIdp', 'Github', 'Google'
+  const [tokenEndpoint, setTokenEndpoint] = useState('')
+  const [issuerUrl, setIssuerUrl] = useState('')
+  const [scopes, setScopes] = useState('')
+  const [profileArn, setProfileArn] = useState('')
 
   // SSO Token 导入
   const [ssoToken, setSsoToken] = useState('')
@@ -193,6 +260,10 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     startUrl?: string
     authMethod?: string
     provider?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
+    profileArn?: string
   }) => {
     console.log('[AddAccountDialog] Login successful, verifying credentials...')
     
@@ -204,7 +275,11 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
         clientSecret: tokenData.clientSecret || '',
         region: tokenData.region || 'us-east-1',
         authMethod: tokenData.authMethod,
-        provider: tokenData.provider
+        provider: tokenData.provider,
+        tokenEndpoint: tokenData.tokenEndpoint,
+        issuerUrl: tokenData.issuerUrl,
+        scopes: tokenData.scopes,
+        profileArn: tokenData.profileArn
       })
 
       if (result.success && result.data) {
@@ -223,7 +298,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           email,
           userId,
           nickname: email ? email.split('@')[0] : undefined,
-          idp: providerName as 'BuilderId' | 'Google' | 'Github',
+          idp: providerName as IdpType,
+          profileArn: result.data.profileArn || tokenData.profileArn,
           groupId: selectedGroupId,
           credentials: {
             accessToken: result.data.accessToken,
@@ -234,9 +310,12 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             region: tokenData.region || 'us-east-1',
             startUrl: tokenData.startUrl,
             expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
-            authMethod: tokenData.authMethod as 'IdC' | 'social',
-            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google',
-            profileArn: result.data.profileArn
+            authMethod: tokenData.authMethod as 'IdC' | 'social' | 'external_idp',
+            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google',
+            profileArn: result.data.profileArn || tokenData.profileArn,
+            tokenEndpoint: tokenData.tokenEndpoint,
+            issuerUrl: tokenData.issuerUrl,
+            scopes: tokenData.scopes
           },
           subscription: {
             type: result.data.subscriptionType as SubscriptionType,
@@ -502,8 +581,12 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
         setClientId(result.data.clientId)
         setClientSecret(result.data.clientSecret)
         setRegion(result.data.region)
-        setAuthMethod(result.data.authMethod as 'IdC' | 'social' || 'IdC')
+        setAuthMethod((result.data.authMethod || 'IdC') as 'IdC' | 'social' | 'external_idp')
         setProvider(result.data.provider || 'BuilderId')
+        setTokenEndpoint(result.data.tokenEndpoint || '')
+        setIssuerUrl(result.data.issuerUrl || '')
+        setScopes(result.data.scopes || '')
+        setProfileArn(result.data.profileArn || '')
         setError(null)
       } else {
         setError(result.error || '导入失败')
@@ -657,22 +740,14 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     }
 
     // 解析凭证数据：自动识别 JSON 或卡密格式
-    let credentials: Array<{
-      refreshToken: string
-      password?: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: 'IdC' | 'social'
-      provider?: string
-    }>
+    let credentials: ImportCredential[]
 
     const trimmed = oidcBatchData.trim()
     let isKamiFormat = false
 
     try {
       const parsed = JSON.parse(trimmed)
-      credentials = Array.isArray(parsed) ? parsed : [parsed]
+      credentials = (Array.isArray(parsed) ? parsed : [parsed]).map(normalizeImportedCredential)
     } catch {
       // JSON 解析失败，尝试卡密格式：邮箱----密码----RefreshToken----ClientId----ClientSecret
       // 支持分隔符：----、Tab、连续空格
@@ -732,7 +807,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
 
         // 根据 provider 自动确定 authMethod
         const credProvider = cred.provider || 'BuilderId'
-        const credAuthMethod = cred.authMethod || ((credProvider === 'BuilderId' || credProvider === 'Enterprise') ? 'IdC' : 'social')
+        const credAuthMethod = cred.authMethod || (credProvider === 'ExternalIdp' ? 'external_idp' : (credProvider === 'BuilderId' || credProvider === 'Enterprise') ? 'IdC' : 'social')
 
         const result = await window.api.verifyAccountCredentials({
           refreshToken: cred.refreshToken,
@@ -740,12 +815,17 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           clientSecret: cred.clientSecret || '',
           region: cred.region || 'us-east-1',
           authMethod: credAuthMethod,
-          provider: credProvider
+          provider: credProvider,
+          tokenEndpoint: cred.tokenEndpoint,
+          issuerUrl: cred.issuerUrl,
+          scopes: cred.scopes,
+          profileArn: cred.profileArn
         })
 
         if (result.success && result.data) {
-          const { email, userId } = result.data
-          const provider = (cred.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'Github' | 'Google'
+          const email = result.data.email || cred._email || ''
+          const userId = result.data.userId || cred._userId || ''
+          const provider = (cred.provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google'
           
           if (isAccountExists(email, userId, provider)) {
             // 已存在的不记入失败，也从输入框中移除
@@ -754,15 +834,17 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           }
           
           // 根据 provider 确定 idp 和 authMethod
-          const idpMap: Record<string, 'BuilderId' | 'Enterprise' | 'Github' | 'Google'> = {
+          const idpMap: Record<string, IdpType> = {
             'BuilderId': 'BuilderId',
             'Enterprise': 'Enterprise',
+            'ExternalIdp': 'ExternalIdp',
             'Github': 'Github',
             'Google': 'Google'
           }
           const idp = idpMap[provider] || 'BuilderId'
           // GitHub 和 Google 使用 social 认证方式，BuilderId 和 Enterprise 使用 IdC
-          const authMethod = cred.authMethod || ((provider === 'BuilderId' || provider === 'Enterprise') ? 'IdC' : 'social')
+          const authMethod = cred.authMethod || (provider === 'ExternalIdp' ? 'external_idp' : (provider === 'BuilderId' || provider === 'Enterprise') ? 'IdC' : 'social')
+          const resolvedProfileArn = result.data.profileArn || cred.profileArn
           
           const now = Date.now()
           addAccount({
@@ -772,6 +854,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             nickname: email ? email.split('@')[0] : undefined,
             idp,
             groupId: selectedGroupId,
+            profileArn: resolvedProfileArn,
             credentials: {
               accessToken: result.data.accessToken,
               csrfToken: '',
@@ -782,7 +865,10 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
               authMethod,
               provider,
-              profileArn: result.data.profileArn
+              profileArn: resolvedProfileArn,
+              tokenEndpoint: cred.tokenEndpoint,
+              issuerUrl: cred.issuerUrl,
+              scopes: cred.scopes
             },
             subscription: {
               type: result.data.subscriptionType as SubscriptionType,
@@ -881,8 +967,12 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
       setError('请填写 Refresh Token')
       return
     }
-    // 社交登录不需要 clientId 和 clientSecret
-    if (authMethod !== 'social' && (!clientId || !clientSecret)) {
+    if (authMethod === 'external_idp' && (!clientId || !tokenEndpoint)) {
+      setError('External IdP 请填写 Client ID 和 Token Endpoint')
+      return
+    }
+    // 社交登录和 External IdP 不需要 clientSecret
+    if (authMethod !== 'social' && authMethod !== 'external_idp' && (!clientId || !clientSecret)) {
       setError('请填写 Client ID 和 Client Secret')
       return
     }
@@ -897,7 +987,11 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
         clientSecret,
         region,
         authMethod,
-        provider
+        provider,
+        tokenEndpoint,
+        issuerUrl,
+        scopes,
+        profileArn
       })
 
       if (result.success && result.data) {
@@ -916,8 +1010,9 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           email,
           userId,
           nickname: email ? email.split('@')[0] : undefined,
-          idp: providerName as 'BuilderId' | 'Github' | 'Google',
+          idp: providerName as IdpType,
           groupId: selectedGroupId,
+          profileArn: result.data.profileArn || profileArn || undefined,
           credentials: {
             accessToken: result.data.accessToken,
             csrfToken: '',
@@ -927,7 +1022,11 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             region,
             expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
             authMethod,
-            provider: (provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+            provider: (provider || 'BuilderId') as 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google',
+            profileArn: result.data.profileArn || profileArn || undefined,
+            tokenEndpoint: tokenEndpoint || undefined,
+            issuerUrl: issuerUrl || undefined,
+            scopes: scopes || undefined
           },
           subscription: {
             type: result.data.subscriptionType as SubscriptionType,
@@ -979,6 +1078,10 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     setRegion('us-east-1')
     setAuthMethod('IdC')
     setProvider('BuilderId')
+    setTokenEndpoint('')
+    setIssuerUrl('')
+    setScopes('')
+    setProfileArn('')
     setSsoToken('')
     setVerifiedData(null)
     setError(null)
@@ -1573,6 +1676,16 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                         </button>
                         <button
                           type="button"
+                          className={`flex-1 h-9 px-3 text-sm rounded-lg border transition-all ${authMethod === 'external_idp' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input hover:bg-muted'}`}
+                          onClick={() => {
+                            setAuthMethod('external_idp')
+                            setProvider('ExternalIdp')
+                          }}
+                        >
+                          External IdP
+                        </button>
+                        <button
+                          type="button"
                           className={`flex-1 h-9 px-3 text-sm rounded-lg border transition-all ${authMethod === 'social' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input hover:bg-muted'}`}
                           onClick={() => {
                             setAuthMethod('social')
@@ -1625,7 +1738,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                     </div>
 
                     {/* IdC 登录需要 Client ID、Client Secret 和 Region */}
-                    {authMethod !== 'social' && (
+                    {authMethod !== 'social' && authMethod !== 'external_idp' && (
                       <>
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-2">
@@ -1706,6 +1819,48 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                               className="w-28 h-10 px-2 text-sm rounded-xl border border-input bg-background/50"
                             />
                           </div>
+                        </div>
+                      </>
+                    )}
+                    {authMethod === 'external_idp' && (
+                      <>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">Token Endpoint <span className="text-destructive">*</span></label>
+                          <input
+                            type="url"
+                            className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 font-mono"
+                            placeholder="https://login.microsoftonline.com/.../oauth2/v2.0/token"
+                            value={tokenEndpoint}
+                            onChange={(e) => setTokenEndpoint(e.target.value)}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Client ID <span className="text-destructive">*</span></label>
+                            <input
+                              type="text"
+                              className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 font-mono"
+                              value={clientId}
+                              onChange={(e) => setClientId(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Profile ARN</label>
+                            <input
+                              type="text"
+                              className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 font-mono"
+                              value={profileArn}
+                              onChange={(e) => setProfileArn(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">Scopes</label>
+                          <textarea
+                            className="w-full min-h-[68px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 resize-none font-mono"
+                            value={scopes}
+                            onChange={(e) => setScopes(e.target.value)}
+                          />
                         </div>
                       </>
                     )}
@@ -1839,7 +1994,7 @@ email----password----refreshToken----clientId----clientSecret`
               {oidcImportMode === 'single' ? (
                 <Button 
                   onClick={handleOidcAdd} 
-                  disabled={isSubmitting || !refreshToken || (authMethod !== 'social' && (!clientId || !clientSecret))}
+                  disabled={isSubmitting || !refreshToken || (authMethod === 'external_idp' ? (!clientId || !tokenEndpoint) : authMethod !== 'social' && (!clientId || !clientSecret))}
                   className="rounded-xl h-10 px-6"
                 >
                   {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

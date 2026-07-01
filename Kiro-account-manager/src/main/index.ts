@@ -42,6 +42,38 @@ import {
   defaultTraySettings
 } from './tray'
 
+interface StoredAccountCredentials {
+  accessToken?: string
+  refreshToken?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authMethod?: ProxyAccount['authMethod']
+  provider?: string
+  profileArn?: string
+  expiresAt?: number
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
+}
+
+interface StoredAccount {
+  id: string
+  email?: string
+  status?: string
+  idp?: string
+  isActive?: boolean
+  machineId?: string
+  profileArn?: string
+  credentials?: StoredAccountCredentials
+}
+
+interface StoredAccountData {
+  accounts?: Record<string, StoredAccount>
+  accountProxyBindings?: Record<string, string>
+  proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
+}
+
 // ============ 自动更新配置 ============
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = true
@@ -376,7 +408,8 @@ function initProxyServer(): ProxyServer {
             account.clientSecret || '',
             account.region || 'us-east-1',
             account.authMethod,
-            account.proxyUrl  // 账号绑定的代理（如有）
+            account.proxyUrl,  // 账号绑定的代理（如有）
+            { tokenEndpoint: account.tokenEndpoint, scopes: account.scopes }
           )
 
           if (refreshResult.success && refreshResult.accessToken) {
@@ -453,11 +486,7 @@ function initProxyServer(): ProxyServer {
       onPoolEmpty: async () => {
         await initStore()
         if (!store) return
-        const accountData = store.get('accountData') as {
-          accounts?: Record<string, any>
-          accountProxyBindings?: Record<string, string>
-          proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-        } | undefined
+        const accountData = store.get('accountData') as StoredAccountData | undefined
         if (!accountData?.accounts) return
 
         // 构建 accountId → proxyUrl 映射（用于反代时 N:1 分桶）
@@ -472,8 +501,11 @@ function initProxyServer(): ProxyServer {
         }
 
         const proxyAccounts = Object.values(accountData.accounts)
-          .filter((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
-          .map((acc: any) => ({
+          .filter(
+            (acc): acc is StoredAccount & { credentials: StoredAccountCredentials & { accessToken: string } } =>
+              acc.status === 'active' && !!acc.credentials?.accessToken
+          )
+          .map((acc): ProxyAccount => ({
             id: acc.id,
             email: acc.email,
             accessToken: acc.credentials.accessToken,
@@ -486,6 +518,9 @@ function initProxyServer(): ProxyServer {
             region: acc.credentials?.region || 'us-east-1',
             authMethod: acc.credentials?.authMethod,
             provider: acc.credentials?.provider || acc.idp,
+            tokenEndpoint: acc.credentials?.tokenEndpoint,
+            issuerUrl: acc.credentials?.issuerUrl,
+            scopes: acc.credentials?.scopes,
             proxyUrl: buildProxyUrl(acc.id)
           }))
         if (proxyAccounts.length > 0 && proxyServer) {
@@ -748,6 +783,72 @@ async function refreshSocialToken(
   }
 }
 
+function normalizeExternalIdpScopes(scopes?: string | string[]): string {
+  if (Array.isArray(scopes)) return scopes.map(s => s.trim()).filter(Boolean).join(' ')
+  return (scopes || '').trim()
+}
+
+// External IdP（Kiro authMethod=external_idp）使用 IdP 自己的 OAuth token endpoint 刷新。
+async function refreshExternalIdpToken(
+  refreshToken: string,
+  clientId: string,
+  tokenEndpoint?: string,
+  scopes?: string | string[],
+  proxyUrl?: string
+): Promise<OidcRefreshResult> {
+  const endpoint = (tokenEndpoint || '').trim()
+  const scope = normalizeExternalIdpScopes(scopes)
+
+  if (!endpoint) return { success: false, error: 'External IdP 缺少 tokenEndpoint' }
+  if (!clientId) return { success: false, error: 'External IdP 缺少 clientId' }
+  if (!refreshToken) return { success: false, error: 'External IdP 缺少 refreshToken' }
+
+  let parsedEndpoint: URL
+  try {
+    parsedEndpoint = new URL(endpoint)
+  } catch {
+    return { success: false, error: 'External IdP tokenEndpoint 不是有效 URL' }
+  }
+  if (parsedEndpoint.protocol !== 'https:') {
+    return { success: false, error: 'External IdP tokenEndpoint 必须使用 https' }
+  }
+
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: clientId,
+    refresh_token: refreshToken
+  })
+  if (scope) body.set('scope', scope)
+
+  try {
+    const response = await fetchWithAppProxy(parsedEndpoint.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    }, proxyUrl)
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error(`[ExternalIdp] Refresh failed: ${response.status} - ${errorText}`)
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` }
+    }
+
+    const data = await response.json()
+    const accessToken = data.access_token || data.accessToken
+    if (!accessToken) return { success: false, error: 'External IdP refresh 响应缺少 access_token' }
+
+    return {
+      success: true,
+      accessToken,
+      refreshToken: data.refresh_token || data.refreshToken || refreshToken,
+      expiresIn: data.expires_in || data.expiresIn
+    }
+  } catch (error) {
+    console.error('[ExternalIdp] Refresh error:', error)
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+  }
+}
+
 // 通用 Token 刷新 - 根据 authMethod 选择刷新方式
 async function refreshTokenByMethod(
   token: string,
@@ -755,11 +856,15 @@ async function refreshTokenByMethod(
   clientSecret: string,
   region: string = 'us-east-1',
   authMethod?: string,
-  proxyUrl?: string  // 账号绑定的代理 URL（可选，优先级最高）
+  proxyUrl?: string,  // 账号绑定的代理 URL（可选，优先级最高）
+  externalIdp?: { tokenEndpoint?: string; scopes?: string | string[] }
 ): Promise<OidcRefreshResult> {
   // 如果是社交登录，使用 Kiro Auth Service 刷新
   if (authMethod === 'social') {
     return refreshSocialToken(token, proxyUrl)
+  }
+  if (authMethod === 'external_idp') {
+    return refreshExternalIdpToken(token, clientId, externalIdp?.tokenEndpoint || clientSecret, externalIdp?.scopes, proxyUrl)
   }
   // 否则使用 OIDC 刷新 (IdC/BuilderId)
   return refreshOidcToken(token, clientId, clientSecret, region, proxyUrl)
@@ -1002,6 +1107,9 @@ async function kiroApiRequest<T>(
     'authorization': `Bearer ${accessToken}`,
     'cookie': `Idp=${idp}; AccessToken=${accessToken}`
   }
+  if (idp === 'ExternalIdp') {
+    headers['TokenType'] = 'EXTERNAL_IDP'
+  }
   
   let response: Response
   if (agent) {
@@ -1136,7 +1244,9 @@ async function fetchRestApi(
   baseUrl: string,
   path: string,
   accessToken: string,
-  machineId?: string
+  machineId?: string,
+  authMethod?: string,
+  provider?: string
 ): Promise<Response> {
   const agent = getKProxyAgent()
   const headers: Record<string, string> = {
@@ -1144,6 +1254,9 @@ async function fetchRestApi(
     'Authorization': `Bearer ${accessToken}`,
     'User-Agent': getKiroUserAgent(machineId),
     'x-amz-user-agent': getKiroAmzUserAgent(machineId)
+  }
+  if (authMethod === 'external_idp' || provider === 'ExternalIdp') {
+    headers['TokenType'] = 'EXTERNAL_IDP'
   }
   const url = `${baseUrl}${path}`
   if (agent) {
@@ -1161,7 +1274,9 @@ async function getUsageLimitsRest(
   profileArn?: string,
   accountMachineId?: string,  // 账户绑定的设备 ID
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
-  email?: string              // 用于日志标识
+  email?: string,             // 用于日志标识
+  authMethod?: string,
+  provider?: string
 ): Promise<UsageLimitsResponse> {
   // 优先使用账户绑定的设备 ID，其次使用 K-Proxy 全局设备 ID
   const machineId = accountMachineId || getCurrentMachineId()
@@ -1182,12 +1297,12 @@ async function getUsageLimitsRest(
   const primaryBase = getRestApiBase(ssoRegion)
   const fallbackBase = getFallbackRestApiBase(ssoRegion)
   
-  let response = await fetchRestApi(primaryBase, path, accessToken, machineId)
+  let response = await fetchRestApi(primaryBase, path, accessToken, machineId, authMethod, provider)
   
   // 如果主端点返回 403，尝试备用端点
   if (response.status === 403) {
     console.log(`[Kiro REST API] Primary 403, fallback → ${fallbackBase}`)
-    response = await fetchRestApi(fallbackBase, path, accessToken, machineId)
+    response = await fetchRestApi(fallbackBase, path, accessToken, machineId, authMethod, provider)
   }
   
   if (!response.ok) {
@@ -1262,11 +1377,13 @@ async function getUsageAndLimits(
   profileArn?: string,
   accountMachineId?: string,  // 账户绑定的设备 ID
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
-  email?: string              // 用于日志标识
+  email?: string,             // 用于日志标识
+  authMethod?: string,
+  provider?: string
 ): Promise<UnifiedUsageResponse> {
   if (currentUsageApiType === 'rest') {
     // 使用 REST API (GetUsageLimits)
-    const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email)
+    const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email, authMethod, provider)
     // REST API 返回的字段名和 CBOR API 相同，直接返回
     return {
       usageBreakdownList: result.usageBreakdownList?.map(b => ({
@@ -1650,7 +1767,7 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
     }
   }
   const accountData = store?.get('accountData') as
-    | { accounts?: Record<string, { id?: string; email?: string; profileArn?: string; proxyUrl?: string; credentials?: { refreshToken?: string; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; startUrl?: string; provider?: string; accessToken?: string; expiresAt?: number } }> }
+    | { accounts?: Record<string, { id?: string; email?: string; profileArn?: string; proxyUrl?: string; credentials?: { refreshToken?: string; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; startUrl?: string; provider?: string; accessToken?: string; expiresAt?: number; tokenEndpoint?: string; issuerUrl?: string; scopes?: string } }> }
     | null
     | undefined
   const account = accountData?.accounts?.[accountId]
@@ -1674,7 +1791,8 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
       creds.clientSecret || '',
       creds.region || 'us-east-1',
       creds.authMethod,
-      account.proxyUrl
+      account.proxyUrl,
+      { tokenEndpoint: creds.tokenEndpoint, scopes: creds.scopes }
     )
   } catch (e) {
     console.warn('[ProactiveRenewal] refreshTokenByMethod threw, stop scheduling:', e)
@@ -1705,13 +1823,16 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
       accessToken: newAccess,
       refreshToken: newRefresh,
       expiresAtIso: new Date(newExpiresAt).toISOString(),
-      authMethod: (creds.authMethod === 'social' ? 'social' : 'IdC'),
+      authMethod: creds.authMethod === 'social' ? 'social' : creds.authMethod === 'external_idp' ? 'external_idp' : 'IdC',
       provider: creds.provider || 'BuilderId',
       region: creds.region,
       startUrl: creds.startUrl,
       clientId: creds.clientId || undefined,
       clientSecret: creds.clientSecret || undefined,
-      profileArn: resolvedProfileArn
+      profileArn: resolvedProfileArn,
+      tokenEndpoint: creds.tokenEndpoint,
+      issuerUrl: creds.issuerUrl,
+      scopes: creds.scopes
     })
     lastWrittenTokenSignature = `${newAccess}|${newRefresh}`
     lastSwitchedAccountId = accountId
@@ -1888,6 +2009,9 @@ type BackgroundRefreshAccount = {
     accessToken?: string
     provider?: string
     profileArn?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
   }
 }
 /** background-batch-refresh 的核心实现（由 IPC 与主进程调度器共用）。在 whenReady 中赋值。 */
@@ -2208,11 +2332,7 @@ function createWindow(): void {
         
         // 自启动时同步账号到代理池（含重试机制应对冷启动数据延迟）
         const syncAccountsToPool = (): number => {
-          const accountData = store!.get('accountData') as {
-            accounts?: Record<string, any>
-            accountProxyBindings?: Record<string, string>
-            proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-          } | undefined
+          const accountData = store!.get('accountData') as StoredAccountData | undefined
           if (!accountData?.accounts) return 0
 
           const bindings = accountData.accountProxyBindings || {}
@@ -2226,8 +2346,11 @@ function createWindow(): void {
           }
 
           const proxyAccounts = Object.values(accountData.accounts)
-            .filter((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
-            .map((acc: any) => {
+            .filter(
+              (acc): acc is StoredAccount & { credentials: StoredAccountCredentials & { accessToken: string } } =>
+                acc.status === 'active' && !!acc.credentials?.accessToken
+            )
+            .map((acc): ProxyAccount => {
               const provider = acc.credentials?.provider || acc.idp
               const authMethod = acc.credentials?.authMethod
               const profileArn = acc.profileArn || acc.credentials?.profileArn
@@ -2246,6 +2369,9 @@ function createWindow(): void {
                 region: acc.credentials?.region || 'us-east-1',
                 authMethod,
                 provider,
+                tokenEndpoint: acc.credentials?.tokenEndpoint,
+                issuerUrl: acc.credentials?.issuerUrl,
+                scopes: acc.credentials?.scopes,
                 proxyUrl: buildProxyUrl(acc.id)
               }
             })
@@ -2257,13 +2383,13 @@ function createWindow(): void {
           return proxyAccounts.length
         }
 
-        let syncedCount = syncAccountsToPool()
+        const syncedCount = syncAccountsToPool()
         if (syncedCount > 0) {
           console.log('[ProxyServer] Auto-synced', syncedCount, 'accounts')
         } else {
           // 冷启动时 store 可能还没有数据（渲染进程尚未初始化完成），延迟重试
           console.log('[ProxyServer] No accounts found on initial sync, will retry...')
-          const retrySync = (attempt: number) => {
+          const retrySync = (attempt: number): void => {
             setTimeout(() => {
               const count = syncAccountsToPool()
               if (count > 0) {
@@ -2850,6 +2976,9 @@ app.whenReady().then(async () => {
       authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'
       provider?: string
       profileArn?: string
+      tokenEndpoint?: string
+      scopes?: string
+      issuerUrl?: string
       machineId?: string
       expiresAt?: number
       proxyUrl?: string
@@ -2882,7 +3011,8 @@ app.whenReady().then(async () => {
             acc.clientSecret || '',
             acc.region || 'us-east-1',
             acc.authMethod,
-            acc.proxyUrl
+            acc.proxyUrl,
+            { tokenEndpoint: acc.tokenEndpoint, scopes: acc.scopes }
           )
           if (r.success && r.accessToken) accessToken = r.accessToken
         } catch { /* 刷新失败则用原 token 尝试，让真实错误暴露出来 */ }
@@ -2900,6 +3030,9 @@ app.whenReady().then(async () => {
         authMethod: acc.authMethod,
         provider: acc.provider,
         profileArn: acc.profileArn,
+        tokenEndpoint: acc.tokenEndpoint,
+        scopes: acc.scopes,
+        issuerUrl: acc.issuerUrl,
         machineId: acc.machineId,
         proxyUrl: acc.proxyUrl,
         expiresAt: acc.expiresAt
@@ -2973,14 +3106,17 @@ app.whenReady().then(async () => {
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
   ipcMain.handle('refresh-account-token', async (_event, account) => {
     try {
-      const { refreshToken, clientId, clientSecret, region, authMethod, startUrl, provider } = account.credentials || {}
+      const { refreshToken, clientId, clientSecret, region, authMethod, startUrl, provider, tokenEndpoint, scopes, issuerUrl } = account.credentials || {}
 
       if (!refreshToken) {
         return { success: false, error: { message: '缺少 Refresh Token' } }
       }
 
-      // 社交登录只需要 refreshToken，IdC 登录需要 clientId 和 clientSecret
-      if (authMethod !== 'social' && (!clientId || !clientSecret)) {
+      // 社交登录只需要 refreshToken；External IdP 需要 clientId + tokenEndpoint；IdC 需要 clientId + clientSecret。
+      if (authMethod === 'external_idp' && (!clientId || !tokenEndpoint)) {
+        return { success: false, error: { message: 'External IdP 缺少 clientId/tokenEndpoint' } }
+      }
+      if (authMethod !== 'social' && authMethod !== 'external_idp' && (!clientId || !clientSecret)) {
         return { success: false, error: { message: '缺少 OIDC 刷新凭证 (clientId/clientSecret)' } }
       }
 
@@ -2998,7 +3134,8 @@ app.whenReady().then(async () => {
         clientSecret || '',
         region || 'us-east-1',
         authMethod,
-        boundProxyUrl
+        boundProxyUrl,
+        { tokenEndpoint, scopes }
       )
 
       if (!refreshResult.success || !refreshResult.accessToken) {
@@ -3031,13 +3168,16 @@ app.whenReady().then(async () => {
             accessToken: newAccess,
             refreshToken: newRefresh,
             expiresAtIso: new Date(Date.now() + expiresIn * 1000).toISOString(),
-            authMethod: (authMethod === 'social' ? 'social' : 'IdC'),
+            authMethod: authMethod === 'social' ? 'social' : authMethod === 'external_idp' ? 'external_idp' : 'IdC',
             provider: provider || (diskToken?.provider as string | undefined) || 'BuilderId',
             region: region || diskToken?.region,
             startUrl,
             clientId: clientId || undefined,
             clientSecret: clientSecret || undefined,
-            profileArn: resolvedProfileArn
+            profileArn: resolvedProfileArn,
+            tokenEndpoint,
+            issuerUrl,
+            scopes
           })
           // 记录刚写入的签名，避免 watcher 触发反向同步回环
           lastWrittenTokenSignature = `${newAccess}|${newRefresh}`
@@ -3540,7 +3680,7 @@ app.whenReady().then(async () => {
             }
             return undefined
           }),
-          getUsageAndLimits(accessToken, idp, undefined, accountMachineId, region, account?.email)
+          getUsageAndLimits(accessToken, idp, account.profileArn || account.credentials?.profileArn, accountMachineId, region, account?.email, authMethod, provider)
         ])
         return parseUsageResponse(usageResult, undefined, userInfoResult)
       } catch (apiError) {
@@ -3557,7 +3697,7 @@ app.whenReady().then(async () => {
         
         // 检查是否是 401 错误（token 过期）
         // 社交登录只需要 refreshToken，IdC 登录需要 clientId 和 clientSecret
-        const canRefresh = refreshToken && (authMethod === 'social' || (clientId && clientSecret))
+        const canRefresh = refreshToken && (authMethod === 'social' || authMethod === 'external_idp' || (clientId && clientSecret))
         if (errorMsg.includes('401') && canRefresh) {
           console.log(`[IPC] Token expired, attempting to refresh (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`)
 
@@ -3568,7 +3708,8 @@ app.whenReady().then(async () => {
             clientSecret || '',
             region || 'us-east-1',
             authMethod,
-            boundProxyUrl
+            boundProxyUrl,
+            { tokenEndpoint: account.credentials?.tokenEndpoint, scopes: account.credentials?.scopes }
           )
           
           if (refreshResult.success && refreshResult.accessToken) {
@@ -3582,7 +3723,7 @@ app.whenReady().then(async () => {
                 }
                 return undefined
               }),
-              getUsageAndLimits(refreshResult.accessToken, idp, undefined, accountMachineId, region)
+              getUsageAndLimits(refreshResult.accessToken, idp, account.profileArn || account.credentials?.profileArn, accountMachineId, region, undefined, authMethod, provider)
             ])
             
             // 返回结果并包含新凭证
@@ -3634,7 +3775,7 @@ app.whenReady().then(async () => {
           }
           if (account.id) poolRefreshInFlightIds.add(account.id)
           try {
-            const { refreshToken, clientId, clientSecret, region, authMethod, accessToken, provider } = account.credentials
+            const { refreshToken, clientId, clientSecret, region, authMethod, accessToken, provider, tokenEndpoint, issuerUrl, scopes } = account.credentials
             const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
 
             // 查询账号绑定的代理（从主进程账号池）
@@ -3669,7 +3810,8 @@ app.whenReady().then(async () => {
                 clientSecret || '',
                 region || 'us-east-1',
                 authMethod,
-                boundProxyUrl
+                boundProxyUrl,
+                { tokenEndpoint, scopes }
               )
 
               if (!refreshResult.success) {
@@ -3707,14 +3849,17 @@ app.whenReady().then(async () => {
                       accessToken: newAccessToken,
                       refreshToken: newRefreshToken,
                       expiresAtIso: new Date(Date.now() + newExpiresIn * 1000).toISOString(),
-                      authMethod: (authMethod === 'social' ? 'social' : 'IdC'),
+                      authMethod: authMethod === 'social' ? 'social' : authMethod === 'external_idp' ? 'external_idp' : 'IdC',
                       provider: provider || (diskToken?.provider as string | undefined) || 'BuilderId',
                       region: region || diskToken?.region,
                       // background-batch-refresh 没传 startUrl，但 disk 的 clientIdHash 不再变；
                       // helper 会用默认 startUrl 计算同一 hash，写入的 client 注册文件路径也不会变
                       clientId: clientId || undefined,
                       clientSecret: clientSecret || undefined,
-                      profileArn: resolvedProfileArn
+                      profileArn: resolvedProfileArn,
+                      tokenEndpoint,
+                      issuerUrl,
+                      scopes
                     })
                     lastWrittenTokenSignature = `${newAccessToken}|${newRefreshToken}`
                     if (account.id) lastSwitchedAccountId = account.id
@@ -3831,7 +3976,7 @@ app.whenReady().then(async () => {
                   }
                 }
                 console.log(`[BackgroundRefresh] Account ${account.id} machineId: ${account.machineId || 'undefined'}`)
-                const rawUsage = await getUsageAndLimits(newAccessToken, idp, undefined, account.machineId, region) as UsageResponse
+                const rawUsage = await getUsageAndLimits(newAccessToken, idp, existingProfileArn || resolvedBgProfileArn, account.machineId, region, undefined, authMethod, provider) as UsageResponse
                 
                 // 解析使用量数据
                 const creditUsage = rawUsage.usageBreakdownList?.find(b => b.resourceType === 'CREDIT')
@@ -3998,6 +4143,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('background-batch-check', async (_event, accounts: Array<{
     id: string
     email: string
+    profileArn?: string
     credentials: {
       accessToken: string
       refreshToken?: string
@@ -4006,6 +4152,10 @@ app.whenReady().then(async () => {
       region?: string
       authMethod?: string
       provider?: string
+      profileArn?: string
+      tokenEndpoint?: string
+      issuerUrl?: string
+      scopes?: string
     }
     idp?: string
   }>, concurrency: number = 10) => {
@@ -4037,13 +4187,13 @@ app.whenReady().then(async () => {
 
             // 确定 idp
             let idp = account.idp || 'BuilderId'
-            if (authMethod === 'social' && provider) {
+            if ((authMethod === 'social' || authMethod === 'external_idp') && provider) {
               idp = provider
             }
 
             // 调用 API 获取用量和用户信息（根据配置选择 REST 或 CBOR 格式）
             const [usageRes, userInfoRes] = await Promise.allSettled([
-              getUsageAndLimits(accessToken, idp, undefined, undefined, account.credentials?.region, account.email) as Promise<{
+              getUsageAndLimits(accessToken, idp, account.profileArn || account.credentials?.profileArn, undefined, account.credentials?.region, account.email, authMethod, provider) as Promise<{
                 usageBreakdownList?: Array<{
                   resourceType?: string
                   displayName?: string
@@ -4376,13 +4526,17 @@ app.whenReady().then(async () => {
     region?: string
     authMethod?: string
     provider?: string  // 'BuilderId', 'Github', 'Google' 等
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
+    profileArn?: string
   }) => {
     console.log('[IPC] verify-account-credentials called')
     
     try {
-      const { refreshToken, clientId, clientSecret, region = 'us-east-1', authMethod, provider } = credentials
+      const { refreshToken, clientId, clientSecret, region = 'us-east-1', authMethod, provider, tokenEndpoint, scopes, profileArn } = credentials
       // 确定 idp：社交登录使用 provider，IdC 也需要根据 provider 区分 BuilderId 和 Enterprise
-      const idp = provider && (provider === 'Enterprise' || provider === 'Github' || provider === 'Google') 
+      const idp = provider && (provider === 'Enterprise' || provider === 'ExternalIdp' || provider === 'Github' || provider === 'Google')
         ? provider 
         : 'BuilderId'
       
@@ -4390,13 +4544,16 @@ app.whenReady().then(async () => {
       if (!refreshToken) {
         return { success: false, error: '请填写 Refresh Token' }
       }
-      if (authMethod !== 'social' && (!clientId || !clientSecret)) {
+      if (authMethod === 'external_idp' && (!clientId || !tokenEndpoint)) {
+        return { success: false, error: 'External IdP 请填写 Client ID 和 Token Endpoint' }
+      }
+      if (authMethod !== 'social' && authMethod !== 'external_idp' && (!clientId || !clientSecret)) {
         return { success: false, error: '请填写 Client ID 和 Client Secret' }
       }
       
       // Step 1: 使用合适的方式刷新获取 accessToken
       console.log(`[Verify] Step 1: Refreshing token (authMethod: ${authMethod || 'IdC'})...`)
-      const refreshResult = await refreshTokenByMethod(refreshToken, clientId, clientSecret, region, authMethod)
+      const refreshResult = await refreshTokenByMethod(refreshToken, clientId, clientSecret, region, authMethod, undefined, { tokenEndpoint, scopes })
       
       if (!refreshResult.success || !refreshResult.accessToken) {
         return { success: false, error: `Token 刷新失败: ${refreshResult.error}` }
@@ -4455,7 +4612,7 @@ app.whenReady().then(async () => {
         userInfo?: { email?: string; userId?: string }
       }
       
-      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, undefined, undefined, region) as UsageResponse
+      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, profileArn, undefined, region, undefined, authMethod, provider) as UsageResponse
       
       // 解析用户信息
       const email = usageResult.userInfo?.email || ''
@@ -4526,9 +4683,9 @@ app.whenReady().then(async () => {
       console.log('[Verify] Success! Email:', email)
 
       // Enterprise 账号：验证时自动获取 profileArn（BuilderId/Social 不需要调 API）
-      let enterpriseProfileArn: string | undefined
+      let enterpriseProfileArn: string | undefined = profileArn
       const isEnt = provider === 'Enterprise' || authMethod === 'external_idp'
-      if (isEnt) {
+      if (isEnt && !enterpriseProfileArn) {
         try {
           enterpriseProfileArn = await fetchEnterpriseProfileArn({
             id: '',
@@ -4643,6 +4800,39 @@ app.whenReady().then(async () => {
         region?: string
         authMethod?: string
         provider?: string
+        clientId?: string
+        issuerUrl?: string
+        tokenEndpoint?: string
+        scopes?: string | string[]
+        profileArn?: string
+      }
+
+      const readKiroIdeProfileArn = async (): Promise<string | undefined> => {
+        const appSupport =
+          process.platform === 'darwin'
+            ? path.join(os.homedir(), 'Library', 'Application Support')
+            : process.platform === 'win32'
+              ? (process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
+              : path.join(os.homedir(), '.config')
+        const profilePaths = [
+          path.join(appSupport, 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent', 'profile.json'),
+          path.join(appSupport, 'Kiro - Insiders', 'User', 'globalStorage', 'kiro.kiroagent', 'profile.json')
+        ]
+
+        for (const profilePath of profilePaths) {
+          try {
+            const profileContent = await readFile(profilePath, 'utf-8')
+            const profileData = JSON.parse(profileContent) as { arn?: string }
+            const arn = typeof profileData.arn === 'string' ? profileData.arn.trim() : ''
+            if (arn.startsWith('arn:aws:codewhisperer:')) {
+              console.log('[Kiro Credentials] Loaded profileArn from Kiro IDE profile.json')
+              return arn
+            }
+          } catch {
+            // profile.json 不存在或不可解析时继续尝试其他路径
+          }
+        }
+        return undefined
       }
       
       try {
@@ -4668,7 +4858,7 @@ app.whenReady().then(async () => {
       }
       
       // 读取客户端注册信息
-      let clientRegPath = path.join(ssoCache, `${clientIdHash}.json`)
+      const clientRegPath = path.join(ssoCache, `${clientIdHash}.json`)
       console.log('[Kiro Credentials] Trying client registration from:', clientRegPath)
       
       let clientData: {
@@ -4704,13 +4894,17 @@ app.whenReady().then(async () => {
         }
       }
       
-      // 社交登录不需要 clientId/clientSecret
+      // 社交登录和 External IdP 不需要本地 clientSecret 注册文件
       const isSocialAuth = tokenData.authMethod === 'social'
+      const isExternalIdpAuth = tokenData.authMethod === 'external_idp'
       
-      if (!isSocialAuth && (!clientData || !clientData.clientId || !clientData.clientSecret)) {
+      if (!isSocialAuth && !isExternalIdpAuth && (!clientData || !clientData.clientId || !clientData.clientSecret)) {
         return { success: false, error: '找不到客户端注册文件，请确保已在 Kiro IDE 中完成登录' }
       }
       
+      const localProfileArn = tokenData.profileArn || await readKiroIdeProfileArn()
+      const localRegion = tokenData.region || localProfileArn?.split(':')[3] || 'us-east-1'
+
       console.log(`[Kiro Credentials] Successfully loaded credentials (authMethod: ${tokenData.authMethod || 'IdC'})`)
       
       return {
@@ -4718,11 +4912,15 @@ app.whenReady().then(async () => {
         data: {
           accessToken: tokenData.accessToken || '',
           refreshToken: tokenData.refreshToken,
-          clientId: clientData?.clientId || '',
+          clientId: tokenData.clientId || clientData?.clientId || '',
           clientSecret: clientData?.clientSecret || '',
-          region: tokenData.region || 'us-east-1',
+          region: localRegion,
           authMethod: tokenData.authMethod || 'IdC',
-          provider: tokenData.provider || 'BuilderId'
+          provider: tokenData.provider || 'BuilderId',
+          issuerUrl: tokenData.issuerUrl,
+          tokenEndpoint: tokenData.tokenEndpoint,
+          scopes: normalizeExternalIdpScopes(tokenData.scopes),
+          profileArn: localProfileArn
         }
       }
     } catch (error) {
@@ -4748,9 +4946,12 @@ app.whenReady().then(async () => {
     clientSecret: string
     region?: string
     startUrl?: string
-    authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise'
+    authMethod?: 'IdC' | 'social' | 'external_idp'
+    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise' | 'ExternalIdp'
     profileArn?: string
+    tokenEndpoint?: string
+    issuerUrl?: string
+    scopes?: string
     accountId?: string
   }) => {
     try {
@@ -4763,6 +4964,9 @@ app.whenReady().then(async () => {
         authMethod = 'IdC',
         provider = 'BuilderId',
         profileArn,
+        tokenEndpoint,
+        issuerUrl,
+        scopes,
         accountId
       } = credentials
       let finalAccessToken = credentials.accessToken
@@ -4772,7 +4976,7 @@ app.whenReady().then(async () => {
       // 切号前先 refresh，确保磁盘里写的是最新 access + 最新 refresh（rotating）
       if (refreshToken) {
         console.log(`[Switch Account] Refreshing token before switch (authMethod: ${authMethod})...`)
-        const refreshResult = await refreshTokenByMethod(refreshToken, clientId, clientSecret, region, authMethod)
+        const refreshResult = await refreshTokenByMethod(refreshToken, clientId, clientSecret, region, authMethod, undefined, { tokenEndpoint, scopes })
         if (refreshResult.success && refreshResult.accessToken) {
           finalAccessToken = refreshResult.accessToken
           // bug A 修复：OIDC 返回新 refreshToken 时必须替换；否则下次 IDE/反代 refresh 会撞已作废的 v1
@@ -4811,7 +5015,10 @@ app.whenReady().then(async () => {
         startUrl,
         clientId,
         clientSecret,
-        profileArn: resolvedProfileArn
+        profileArn: resolvedProfileArn,
+        tokenEndpoint,
+        issuerUrl,
+        scopes
       })
       console.log('[Switch Account] Token written to:', tokenPath)
       if (clientRegPath) {
@@ -4855,6 +5062,8 @@ app.whenReady().then(async () => {
     profileArn?: string
     provider?: string
     scopes?: string[]
+    tokenEndpoint?: string
+    issuerUrl?: string
   }) => {
     const os = await import('os')
     const path = await import('path')
@@ -4868,15 +5077,16 @@ app.whenReady().then(async () => {
         region = 'us-east-1',
         profileArn,
         provider,
-        scopes
+        scopes,
+        tokenEndpoint
       } = credentials
       let { accessToken } = credentials
 
       // 切号前先刷新 token（和 IDE 切号一致）
       if (refreshToken) {
-        const authMethod = (provider === 'Google' || provider === 'Github') ? 'social' : undefined
+        const authMethod = provider === 'Google' || provider === 'Github' ? 'social' : provider === 'ExternalIdp' ? 'external_idp' : undefined
         console.log(`[Switch CLI] Refreshing token before switch (provider: ${provider})...`)
-        const refreshResult = await refreshTokenByMethod(refreshToken, clientId || '', clientSecret || '', region, authMethod)
+        const refreshResult = await refreshTokenByMethod(refreshToken, clientId || '', clientSecret || '', region, authMethod, undefined, { tokenEndpoint, scopes })
         if (refreshResult.success && refreshResult.accessToken) {
           accessToken = refreshResult.accessToken
           console.log('[Switch CLI] Token refreshed successfully')
@@ -5682,26 +5892,30 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-kiro-available-models', async () => {
     try {
       if (!store) return { models: [] }
-      const accountData = store.get('accountData') as { accounts?: Record<string, any> } | undefined
+      const accountData = store.get('accountData') as Pick<StoredAccountData, 'accounts'> | undefined
       if (!accountData?.accounts) return { models: [] }
 
       // 优先使用当前激活账号（isActive），其次使用第一个 active 且有 accessToken 的账号
-      const allAccounts = Object.values(accountData.accounts) as any[]
-      const account = allAccounts.find((acc: any) => acc.isActive && acc.credentials?.accessToken)
-        || allAccounts.find((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
+      const allAccounts = Object.values(accountData.accounts)
+      const account = allAccounts.find((acc) => acc.isActive && acc.credentials?.accessToken)
+        || allAccounts.find((acc) => acc.status === 'active' && acc.credentials?.accessToken)
       if (!account) return { models: [] }
 
-      const proxyAccount = {
+      const proxyAccount: ProxyAccount = {
         id: account.id,
         email: account.email,
-        accessToken: account.credentials.accessToken,
+        accessToken: account.credentials?.accessToken || '',
         refreshToken: account.credentials?.refreshToken,
         profileArn: account.profileArn,
         expiresAt: account.credentials?.expiresAt,
         clientId: account.credentials?.clientId,
         clientSecret: account.credentials?.clientSecret,
         region: account.credentials?.region || 'us-east-1',
-        authMethod: account.credentials?.authMethod
+        authMethod: account.credentials?.authMethod,
+        provider: account.credentials?.provider || account.idp,
+        tokenEndpoint: account.credentials?.tokenEndpoint,
+        issuerUrl: account.credentials?.issuerUrl,
+        scopes: account.credentials?.scopes
       }
 
       const models = await fetchKiroModels(proxyAccount)

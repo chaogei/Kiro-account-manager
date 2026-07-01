@@ -295,6 +295,9 @@ export function ProxyPanel() {
           region: acc.credentials?.region || 'us-east-1',
           authMethod: acc.credentials?.authMethod,
           provider: acc.credentials?.provider || acc.idp,
+          tokenEndpoint: acc.credentials?.tokenEndpoint,
+          issuerUrl: acc.credentials?.issuerUrl,
+          scopes: acc.credentials?.scopes,
           // 透传分组 ID：后端 getAvailableAccount 可据此做二次过滤（双保险），即便前端忘了重同步也安全
           groupId: acc.groupId
         }))
@@ -1550,5 +1553,4 @@ export function ProxyPanel() {
     </div>
   )
 }
-
 

@@ -2,7 +2,7 @@
 // 多账号管理器类型定义
 // ============================================
 
-export type IdpType = 'Google' | 'Github' | 'BuilderId' | 'Enterprise' | 'AWSIdC' | 'Internal' | 'IAM_SSO'
+export type IdpType = 'Google' | 'Github' | 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'AWSIdC' | 'Internal' | 'IAM_SSO'
 
 export type SubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise' | 'Teams'
 
@@ -20,9 +20,13 @@ export interface AccountCredentials {
   region?: string        // AWS 区域，默认 us-east-1
   startUrl?: string      // SSO Start URL（Enterprise 账户专用）
   expiresAt: number      // 时间戳
-  authMethod?: 'IdC' | 'social'  // 认证方式：IdC (BuilderId/Enterprise) 或 social (GitHub/Google)
-  provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'  // 身份提供商
+  authMethod?: 'IdC' | 'social' | 'external_idp'  // 认证方式：IdC、social 或 External IdP
+  provider?: 'BuilderId' | 'Enterprise' | 'ExternalIdp' | 'Github' | 'Google' | 'IAM_SSO'  // 身份提供商
   profileArn?: string    // Enterprise 真实 profileArn（从 ListAvailableProfiles 获取）
+  tokenEndpoint?: string // External IdP 刷新端点（如 Microsoft OAuth token endpoint）
+  issuerUrl?: string     // External IdP issuer
+  scopes?: string        // External IdP OAuth scopes
+  loginHint?: string     // External IdP 登录提示
 }
 
 /**

@@ -45,9 +45,18 @@ export function ProxyLogsDialog({
   if (!open) return null
 
   const handleExport = () => {
-    const content = logs.map(log => 
-      `${log.time}\t${log.path}\t${log.status}${log.credits ? `\t${log.credits.toFixed(6)} credits` : ''}`
-    ).join('\n')
+    const formatCell = (value: string | number | undefined) => String(value ?? '').replace(/[\t\r\n]+/g, ' ')
+    const content = logs.map(log => {
+      const credits = log.credits ? `${log.credits.toFixed(6)} credits` : ''
+      return [
+        log.time,
+        log.path,
+        log.model,
+        log.status,
+        credits,
+        log.error
+      ].map(formatCell).join('\t')
+    }).join('\n')
     const blob = new Blob([content], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -181,5 +190,4 @@ export function ProxyLogsDialog({
     </div>
   )
 }
-
 
