@@ -60,3 +60,15 @@ test('proxy Kiro API sends ExternalIdp token type header', () => {
   assert.match(source, /TokenType/)
   assert.match(source, /EXTERNAL_IDP/)
 })
+
+test('ExternalIdp model listing sends token type header', () => {
+  const source = read('src/main/proxy/kiroApi.ts')
+  const start = source.indexOf('export async function fetchKiroModels')
+  const end = source.indexOf('// 订阅计划信息', start)
+  const body = source.slice(start, end)
+
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+  assert.match(body, /TokenType/)
+  assert.match(body, /EXTERNAL_IDP/)
+})

@@ -2323,6 +2323,10 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
     'x-amzn-codewhisperer-optout': 'true'
   }
 
+  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
+    headers['TokenType'] = 'EXTERNAL_IDP'
+  }
+
   const allModels: KiroModel[] = []
   let nextToken: string | undefined
 
