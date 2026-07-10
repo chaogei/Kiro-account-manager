@@ -2208,7 +2208,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
               clientSecret: creds.clientSecret,
               region: creds.region || 'us-east-1',
               profileArn: (availableAccount as { profileArn?: string }).profileArn,
-              provider: creds.provider
+              provider: creds.provider,
+              authMethod: creds.authMethod
             })
             if (cliResult && !cliResult.success) {
               console.warn('[AutoSwitch CLI] Failed:', cliResult.error)

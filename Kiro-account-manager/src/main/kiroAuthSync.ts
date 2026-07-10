@@ -72,7 +72,12 @@ export function resolveProfileArnForWrite(input: {
   if (input.profileArn && !isPlaceholderProfileArn(input.profileArn)) {
     return input.profileArn
   }
-  if (input.authMethod === 'social' || input.provider === 'Github' || input.provider === 'Google') {
+  const providerNorm = (input.provider || '').toLowerCase()
+  if (
+    input.authMethod === 'social' ||
+    providerNorm === 'github' ||
+    providerNorm === 'google'
+  ) {
     return KIRO_SOCIAL_PROFILE_ARN
   }
   // Enterprise 不能用 BuilderId 占位符（IDE 调接口会 Invalid token）

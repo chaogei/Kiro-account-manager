@@ -23,7 +23,8 @@ import {
   parseAccessTokenClaims,
   watchKiroAuthTokenFile,
   resolveProfileArnForWrite,
-  KIRO_AUTH_TOKEN_PATH
+  KIRO_AUTH_TOKEN_PATH,
+  KIRO_SOCIAL_PROFILE_ARN
 } from './kiroAuthSync'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
@@ -4854,6 +4855,7 @@ app.whenReady().then(async () => {
     region?: string
     profileArn?: string
     provider?: string
+    authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
   }) => {
     const os = await import('os')
@@ -4866,19 +4868,32 @@ app.whenReady().then(async () => {
         clientSecret,
         region = 'us-east-1',
         profileArn,
-        provider,
         scopes
       } = credentials
       let finalAccessToken = credentials.accessToken
       let finalRefreshToken = credentials.refreshToken
       let finalExpiresIn = 3600
 
-      const isSocial = provider === 'Google' || provider === 'Github'
+      // Gmail/Google Workspace accounts often store provider as "google" (lowercase)
+      // or only set authMethod=social. Strict === 'Google' mis-classifies them as IdC
+      // and writes kirocli:odic:token → CLI broken while IDE (uses authMethod) works.
+      const providerRaw = (credentials.provider || '').trim()
+      const providerNorm = providerRaw.toLowerCase()
+      const authMethodRaw = (credentials.authMethod || '').trim()
+      const isSocial =
+        authMethodRaw === 'social' ||
+        providerNorm === 'google' ||
+        providerNorm === 'github'
       const authMethod = isSocial ? 'social' : 'IdC'
+      // kiro-cli SocialToken expects provider casing Google/Github (empirically verified)
+      const providerForCli =
+        providerNorm === 'github' ? 'Github' : isSocial ? 'Google' : providerRaw || 'BuilderId'
 
       // Align with IDE switch: refresh first, rotate refresh_token, abort on failure
       if (finalRefreshToken) {
-        console.log(`[Switch CLI] Refreshing token before switch (provider: ${provider})...`)
+        console.log(
+          `[Switch CLI] Refreshing token before switch (provider: ${providerForCli}, isSocial: ${isSocial})...`
+        )
         const refreshResult = await refreshTokenByMethod(
           finalRefreshToken,
           clientId || '',
@@ -4915,7 +4930,7 @@ app.whenReady().then(async () => {
       const resolvedProfileArn = resolveProfileArnForWrite({
         profileArn,
         authMethod,
-        provider,
+        provider: providerForCli,
         region
       })
 
@@ -4931,14 +4946,15 @@ app.whenReady().then(async () => {
         region
       }
       if (isSocial) {
-        // Prefer explicit provider; default Google for social path
-        tokenData.provider = provider === 'Github' ? 'Github' : 'Google'
+        tokenData.provider = providerForCli // "Google" | "Github"
+        // Always pin social profile ARN — empty/wrong ARN → "dispatch failure" / invalid social token
+        tokenData.profile_arn = resolvedProfileArn || KIRO_SOCIAL_PROFILE_ARN
       } else {
         tokenData.oauth_flow = 'DeviceCode'
         tokenData.start_url = 'https://view.awsapps.com/start'
-      }
-      if (resolvedProfileArn) {
-        tokenData.profile_arn = resolvedProfileArn
+        if (resolvedProfileArn) {
+          tokenData.profile_arn = resolvedProfileArn
+        }
       }
       if (scopes) tokenData.scopes = scopes
 
@@ -4958,9 +4974,13 @@ app.whenReady().then(async () => {
         kvRows.push({ key: preferredRegKey, value: JSON.stringify(regData) })
       }
 
-      const staleTokenKeys = ['kirocli:social:token', 'kirocli:odic:token', 'codewhisperer:odic:token'].filter(
-        (k) => k !== preferredTokenKey
-      )
+      // Clear every competing auth key so kiro-cli cannot prefer a stale Google/IdC session
+      const staleTokenKeys = [
+        'kirocli:social:token',
+        'kirocli:odic:token',
+        'codewhisperer:odic:token',
+        'kirocli:external-idp:token'
+      ].filter((k) => k !== preferredTokenKey)
 
       // Prefer parameterized writes (token JSON may contain quotes); fall back to sqlite3 CLI
       let wrote = false

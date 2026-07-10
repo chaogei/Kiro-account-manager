@@ -154,7 +154,8 @@ function AccountListRowComponent({
       clientSecret: credentials.clientSecret,
       region: credentials.region || 'us-east-1',
       profileArn: account.profileArn,
-      provider: credentials.provider
+      provider: credentials.provider,
+      authMethod: credentials.authMethod
     }
     const idePayload = {
       accessToken: credentials.accessToken,

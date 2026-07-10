@@ -243,6 +243,7 @@ interface KiroApi {
     region?: string
     profileArn?: string
     provider?: string
+    authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
   }) => Promise<{
     success: boolean
