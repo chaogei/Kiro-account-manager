@@ -572,7 +572,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   autoSwitchInterval: 5,
   batchImportConcurrency: 100,
   loginPrivateMode: false,
-  switchTarget: 'ide' as const,
+  switchTarget: 'both' as const,
   theme: 'default',
   darkMode: false,
   language: 'auto',
@@ -1718,7 +1718,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchEnabled: data.autoSwitchEnabled ?? false,
           autoSwitchThreshold: data.autoSwitchThreshold ?? 0,
           autoSwitchInterval: data.autoSwitchInterval ?? 5,
-          switchTarget: data.switchTarget ?? 'ide',
+          switchTarget: data.switchTarget ?? 'both',
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
           language: data.language ?? 'auto',
@@ -2200,15 +2200,41 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           }
         }
         if (target === 'cli' || target === 'both') {
-          window.api.switchAccountCli?.({
-            accessToken: creds.accessToken || '',
-            refreshToken: creds.refreshToken || '',
-            clientId: creds.clientId,
-            clientSecret: creds.clientSecret,
-            region: creds.region || 'us-east-1',
-            profileArn: (availableAccount as { profileArn?: string }).profileArn,
-            provider: creds.provider
-          }).catch(err => console.warn('[AutoSwitch CLI] Failed:', err))
+          try {
+            const cliResult = await window.api.switchAccountCli?.({
+              accessToken: creds.accessToken || '',
+              refreshToken: creds.refreshToken || '',
+              clientId: creds.clientId,
+              clientSecret: creds.clientSecret,
+              region: creds.region || 'us-east-1',
+              profileArn: (availableAccount as { profileArn?: string }).profileArn,
+              provider: creds.provider
+            })
+            if (cliResult && !cliResult.success) {
+              console.warn('[AutoSwitch CLI] Failed:', cliResult.error)
+            } else if (cliResult?.refreshedCredentials) {
+              const rc = cliResult.refreshedCredentials
+              set((state) => {
+                const accounts = new Map(state.accounts)
+                const acc = accounts.get(availableAccount.id)
+                if (acc) {
+                  accounts.set(availableAccount.id, {
+                    ...acc,
+                    credentials: {
+                      ...acc.credentials,
+                      accessToken: rc.accessToken,
+                      refreshToken: rc.refreshToken,
+                      expiresAt: Date.now() + rc.expiresIn * 1000
+                    }
+                  })
+                }
+                return { accounts }
+              })
+              get().saveToStorage()
+            }
+          } catch (err) {
+            console.warn('[AutoSwitch CLI] Failed:', err)
+          }
         }
       } else {
         console.log('[AutoSwitch] No available account to switch to')

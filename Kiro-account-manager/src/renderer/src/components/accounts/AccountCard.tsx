@@ -277,7 +277,30 @@ export const AccountCard = memo(function AccountCard({
     }
     if (switchTarget === 'cli' || switchTarget === 'both') {
       const result = await window.api.switchAccountCli(cliPayload)
-      if (!result.success && switchTarget === 'cli') { success = false; errorMsg = result.error || '' }
+      if (!result.success) {
+        success = false
+        const cliErr = result.error || 'CLI switch failed'
+        errorMsg = errorMsg ? `${errorMsg}; CLI: ${cliErr}` : cliErr
+      } else if (result.refreshedCredentials) {
+        const rc = result.refreshedCredentials
+        useAccountsStore.setState((state) => {
+          const accounts = new Map(state.accounts)
+          const acc = accounts.get(account.id)
+          if (acc) {
+            accounts.set(account.id, {
+              ...acc,
+              credentials: {
+                ...acc.credentials,
+                accessToken: rc.accessToken,
+                refreshToken: rc.refreshToken,
+                expiresAt: Date.now() + rc.expiresIn * 1000
+              }
+            })
+          }
+          return { accounts }
+        })
+        useAccountsStore.getState().saveToStorage()
+      }
     }
 
     if (success) {

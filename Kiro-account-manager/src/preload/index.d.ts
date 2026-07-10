@@ -244,7 +244,16 @@ interface KiroApi {
     profileArn?: string
     provider?: string
     scopes?: string[]
-  }) => Promise<{ success: boolean; error?: string; dbPath?: string }>
+  }) => Promise<{
+    success: boolean
+    error?: string
+    dbPath?: string
+    refreshedCredentials?: {
+      accessToken: string
+      refreshToken: string
+      expiresIn: number
+    }
+  }>
 
   // 退出登录 - 清除本地 SSO 缓存
   logoutAccount: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>

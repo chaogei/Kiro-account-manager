@@ -175,7 +175,16 @@ const api = {
     profileArn?: string
     provider?: string
     scopes?: string[]
-  }): Promise<{ success: boolean; error?: string; dbPath?: string }> => {
+  }): Promise<{
+    success: boolean
+    error?: string
+    dbPath?: string
+    refreshedCredentials?: {
+      accessToken: string
+      refreshToken: string
+      expiresIn: number
+    }
+  }> => {
     return ipcRenderer.invoke('switch-account-cli', credentials)
   },
 
