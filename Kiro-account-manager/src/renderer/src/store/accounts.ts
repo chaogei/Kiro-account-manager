@@ -2160,13 +2160,36 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       if (availableAccount) {
         console.log(`[AutoSwitch] Switching to: ${availableAccount.email}`)
         setActiveAccount(availableAccount.id)
-        // 根据 switchTarget 设置决定切换目标
         const { switchTarget: target } = get()
         const creds = availableAccount.credentials
+        let liveAccess = creds.accessToken || ''
+        let liveRefresh = creds.refreshToken || ''
+        const applyRc = (rc: { accessToken: string; refreshToken: string; expiresIn: number }): void => {
+          liveAccess = rc.accessToken
+          liveRefresh = rc.refreshToken
+          set((state) => {
+            const accounts = new Map(state.accounts)
+            const acc = accounts.get(availableAccount.id)
+            if (acc) {
+              accounts.set(availableAccount.id, {
+                ...acc,
+                credentials: {
+                  ...acc.credentials,
+                  accessToken: rc.accessToken,
+                  refreshToken: rc.refreshToken,
+                  expiresAt: Date.now() + rc.expiresIn * 1000
+                }
+              })
+            }
+            return { accounts }
+          })
+          get().saveToStorage()
+        }
+        let ideOk = true
         if (target === 'ide' || target === 'both') {
           const switchResult = await window.api.switchAccount({
-            accessToken: creds.accessToken || '',
-            refreshToken: creds.refreshToken || '',
+            accessToken: liveAccess,
+            refreshToken: liveRefresh,
             clientId: creds.clientId || '',
             clientSecret: creds.clientSecret || '',
             region: creds.region || 'us-east-1',
@@ -2176,62 +2199,30 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             profileArn: (availableAccount as { profileArn?: string }).profileArn,
             accountId: availableAccount.id
           })
-          // 把 main 进程 refresh 后的最新 credentials 同步回 store，
-          // 否则 store 里的 refreshToken 仍是 v1（已被服务端 rotate 作废），下次任何 refresh 都会失败
           if (switchResult?.success && switchResult.refreshedCredentials) {
-            const rc = switchResult.refreshedCredentials
-            set((state) => {
-              const accounts = new Map(state.accounts)
-              const acc = accounts.get(availableAccount.id)
-              if (acc) {
-                accounts.set(availableAccount.id, {
-                  ...acc,
-                  credentials: {
-                    ...acc.credentials,
-                    accessToken: rc.accessToken,
-                    refreshToken: rc.refreshToken,
-                    expiresAt: Date.now() + rc.expiresIn * 1000
-                  }
-                })
-              }
-              return { accounts }
-            })
-            get().saveToStorage()
+            applyRc(switchResult.refreshedCredentials)
+          } else if (!switchResult?.success) {
+            ideOk = false
+            console.warn('[AutoSwitch IDE] Failed:', switchResult?.error)
           }
         }
-        if (target === 'cli' || target === 'both') {
+        if (ideOk && (target === 'cli' || target === 'both')) {
           try {
             const cliResult = await window.api.switchAccountCli?.({
-              accessToken: creds.accessToken || '',
-              refreshToken: creds.refreshToken || '',
+              accessToken: liveAccess,
+              refreshToken: liveRefresh,
               clientId: creds.clientId,
               clientSecret: creds.clientSecret,
               region: creds.region || 'us-east-1',
               profileArn: (availableAccount as { profileArn?: string }).profileArn,
               provider: creds.provider,
-              authMethod: creds.authMethod
+              authMethod: creds.authMethod,
+              skipRefresh: target === 'both'
             })
             if (cliResult && !cliResult.success) {
               console.warn('[AutoSwitch CLI] Failed:', cliResult.error)
             } else if (cliResult?.refreshedCredentials) {
-              const rc = cliResult.refreshedCredentials
-              set((state) => {
-                const accounts = new Map(state.accounts)
-                const acc = accounts.get(availableAccount.id)
-                if (acc) {
-                  accounts.set(availableAccount.id, {
-                    ...acc,
-                    credentials: {
-                      ...acc.credentials,
-                      accessToken: rc.accessToken,
-                      refreshToken: rc.refreshToken,
-                      expiresAt: Date.now() + rc.expiresIn * 1000
-                    }
-                  })
-                }
-                return { accounts }
-              })
-              get().saveToStorage()
+              applyRc(cliResult.refreshedCredentials)
             }
           } catch (err) {
             console.warn('[AutoSwitch CLI] Failed:', err)

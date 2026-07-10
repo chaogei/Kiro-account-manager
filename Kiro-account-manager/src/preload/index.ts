@@ -176,6 +176,7 @@ const api = {
     provider?: string
     authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
+    skipRefresh?: boolean
   }): Promise<{
     success: boolean
     error?: string

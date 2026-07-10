@@ -4857,6 +4857,8 @@ app.whenReady().then(async () => {
     provider?: string
     authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
+    /** When true, write tokens as-is (already refreshed by IDE switch). Avoids double-rotate. */
+    skipRefresh?: boolean
   }) => {
     const os = await import('os')
     const path = await import('path')
@@ -4889,8 +4891,10 @@ app.whenReady().then(async () => {
       const providerForCli =
         providerNorm === 'github' ? 'Github' : isSocial ? 'Google' : providerRaw || 'BuilderId'
 
-      // Align with IDE switch: refresh first, rotate refresh_token, abort on failure
-      if (finalRefreshToken) {
+      // Align with IDE switch: refresh first, rotate refresh_token, abort on failure.
+      // skipRefresh=true when IDE switch already rotated (Both target) — second refresh
+      // would invalidate the token just written to IDE disk / store.
+      if (finalRefreshToken && !credentials.skipRefresh) {
         console.log(
           `[Switch CLI] Refreshing token before switch (provider: ${providerForCli}, isSocial: ${isSocial})...`
         )
@@ -4914,6 +4918,8 @@ app.whenReady().then(async () => {
             error: `刷新 Token 失败，未写入 kiro-cli SQLite，避免半坏 token。原因：${errMsg}`
           }
         }
+      } else if (credentials.skipRefresh) {
+        console.log('[Switch CLI] skipRefresh=true — writing caller-provided tokens without OIDC refresh')
       }
 
       const dataDir = process.platform === 'win32'
