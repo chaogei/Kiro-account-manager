@@ -377,25 +377,35 @@ export function SettingsPage() {
       if (fileData && fileData.format === 'json') {
         const data = JSON.parse(fileData.content)
         const importResult = importFromExportData(data)
-        alert(`导入完成：成功 ${importResult.success} 个，失败 ${importResult.failed} 个`)
+        alert(isEn
+          ? `Import complete: ${importResult.success} succeeded, ${importResult.failed} failed`
+          : `导入完成：成功 ${importResult.success} 个，失败 ${importResult.failed} 个`)
       } else if (fileData) {
-        alert('设置页面仅支持 JSON 格式导入，请使用账号管理页面导入 CSV/TXT')
+        alert(isEn
+          ? 'Settings page only supports JSON import. Use the Accounts page for CSV/TXT.'
+          : '设置页面仅支持 JSON 格式导入，请使用账号管理页面导入 CSV/TXT')
       }
     } catch (e) {
-      alert(`导入失败: ${e instanceof Error ? e.message : '未知错误'}`)
+      alert(isEn
+        ? `Import failed: ${e instanceof Error ? e.message : 'Unknown error'}`
+        : `导入失败: ${e instanceof Error ? e.message : '未知错误'}`)
     } finally {
       setIsImporting(false)
     }
   }
 
   const handleClearData = () => {
-    if (confirm('确定要清除所有账号数据吗？此操作不可恢复！')) {
-      if (confirm('再次确认：这将删除所有账号、分组和标签数据！')) {
+    if (confirm(isEn
+      ? 'Are you sure you want to clear all account data? This cannot be undone!'
+      : '确定要清除所有账号数据吗？此操作不可恢复！')) {
+      if (confirm(isEn
+        ? 'Confirm again: this will delete ALL accounts, groups, and tag data!'
+        : '再次确认：这将删除所有账号、分组和标签数据！')) {
         // 清除所有数据
         Array.from(accounts.keys()).forEach(id => {
           useAccountsStore.getState().removeAccount(id)
         })
-        alert('所有数据已清除')
+        alert(isEn ? 'All data has been cleared' : '所有数据已清除')
       }
     }
   }
@@ -412,7 +422,7 @@ export function SettingsPage() {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-primary">{t('settings.title')}</h1>
-            <p className="text-muted-foreground">{t('settings.title') === 'Settings' ? 'Configure app features' : '配置应用的各项功能'}</p>
+            <p className="text-muted-foreground">{isEn ? 'Configure app features' : '配置应用的各项功能'}</p>
           </div>
         </div>
       </div>
@@ -424,29 +434,29 @@ export function SettingsPage() {
             <div className="p-2 rounded-lg bg-primary/10">
               <Globe className="h-4 w-4 text-primary" />
             </div>
-            语言 / Language
+            Language / 语言
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="font-medium">显示语言 / Display Language</p>
-              <p className="text-sm text-muted-foreground">选择界面显示语言 / Select interface language</p>
+              <p className="font-medium">Display Language / 显示语言</p>
+              <p className="text-sm text-muted-foreground">Select interface language / 选择界面显示语言</p>
             </div>
             <select
               className="w-[160px] h-9 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
               value={language}
               onChange={(e) => setLanguage(e.target.value as 'auto' | 'en' | 'zh')}
             >
-              <option value="auto">🌐 自动 (Auto)</option>
-              <option value="zh">🇨🇳 简体中文</option>
+              <option value="auto">🌐 Auto (自动)</option>
               <option value="en">🇺🇸 English</option>
+              <option value="zh">🇨🇳 简体中文</option>
             </select>
           </div>
           <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3 space-y-1">
-            <p>• 自动模式会根据系统语言自动选择</p>
             <p>• Auto mode will follow system language</p>
-            <p>• 支持自定义翻译文件扩展（开发中）</p>
+            <p>• 自动模式会根据系统语言自动选择</p>
+            <p>• Custom translation files supported (coming soon)</p>
           </div>
         </CardContent>
       </Card>
