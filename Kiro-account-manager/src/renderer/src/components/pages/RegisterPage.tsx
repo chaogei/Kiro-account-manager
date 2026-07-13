@@ -27,111 +27,141 @@ interface ErrorDiagnosis {
  * 把失败原因翻译成"普通话"的诊断 + 建议，覆盖批量注册里最常见的几类失败。
  * 优先级：风控 > 代理白名单 > 代理链 > 严格代理 > EOF > OTP超时 > 网络 > 邮箱已用 > 限流 > 鉴权 > suspended > unknown
  */
-function diagnoseRegError(err: string | undefined): ErrorDiagnosis {
+function diagnoseRegError(err: string | undefined, isEn = false): ErrorDiagnosis {
   const e = (err || '').toLowerCase()
   if (!e) {
-    return { category: 'unknown', title: '未知错误', reasons: ['未捕获到具体错误信息'], suggestions: ['查看完整日志'] }
+    return { category: 'unknown', title: isEn ? 'Unknown error' : '未知错误', reasons: [isEn ? 'No specific error captured' : '未捕获到具体错误信息'], suggestions: [isEn ? 'Check full logs' : '查看完整日志'] }
   }
-  // AWS 风控
+  // AWS risk control
   if (e.includes('aws-risk-control') || e.includes('风控') || e.includes('请稍后再试') || e.includes('try again later')) {
     return {
       category: 'risk_control',
-      title: 'AWS 风控触发',
-      reasons: ['注册请求被 AWS 安全策略拦截', '常见诱因：同 IP 短时注册多账号、行为节奏机械化、邮箱域名被关联'],
-      suggestions: ['启用代理池 + 每号唯一 session（每号一个 IP）', '降低速率（限速 10/分钟或更低）', '邮箱用多域名轮换', '若用 bestproxy 类住宅代理，确保来源 IP 非大陆']
+      title: isEn ? 'AWS Risk Control Triggered' : 'AWS 风控触发',
+      reasons: isEn
+        ? ['Registration request blocked by AWS security policy', 'Common causes: same IP registering multiple accounts quickly, mechanical behavior patterns, correlated email domains']
+        : ['注册请求被 AWS 安全策略拦截', '常见诱因：同 IP 短时注册多账号、行为节奏机械化、邮箱域名被关联'],
+      suggestions: isEn
+        ? ['Enable proxy pool + unique session per account (one IP per account)', 'Lower rate (limit to 10/min or less)', 'Rotate multiple email domains', 'If using residential proxies, ensure source IP is not from mainland China']
+        : ['启用代理池 + 每号唯一 session（每号一个 IP）', '降低速率（限速 10/分钟或更低）', '邮箱用多域名轮换', '若用 bestproxy 类住宅代理，确保来源 IP 非大陆']
     }
   }
-  // bestproxy 610 / IP 白名单类
+  // bestproxy 610 / IP whitelist
   if (e.includes('610') || e.includes('whitelist') || (e.includes('connect') && e.includes('http 4'))) {
     return {
       category: 'proxy_whitelist',
-      title: '代理认证 / 白名单失败',
-      reasons: ['目标代理拒绝认证（账密错或来源 IP 不在白名单）', 'bestproxy 的 610 = 来源 IP 未授权'],
-      suggestions: ['在代理后台把当前出口 IP 加入白名单', '或改用账密直连模式 + 确保来源是允许地区', '配合"上游中转代理"用非大陆中转']
+      title: isEn ? 'Proxy Auth / Whitelist Failed' : '代理认证 / 白名单失败',
+      reasons: isEn
+        ? ['Target proxy rejected authentication (wrong credentials or source IP not whitelisted)', 'bestproxy 610 = source IP not authorized']
+        : ['目标代理拒绝认证（账密错或来源 IP 不在白名单）', 'bestproxy 的 610 = 来源 IP 未授权'],
+      suggestions: isEn
+        ? ['Add your current egress IP to the proxy whitelist', 'Or use username/password direct mode from an allowed region', 'Use an upstream relay proxy from a non-CN exit']
+        : ['在代理后台把当前出口 IP 加入白名单', '或改用账密直连模式 + 确保来源是允许地区', '配合"上游中转代理"用非大陆中转']
     }
   }
-  // 代理链失败
+  // Proxy chain failure
   if (e.includes('proxychain') || e.includes('代理链') || e.includes('上游中转')) {
     return {
       category: 'proxy_chain',
-      title: '代理链建立失败',
-      reasons: ['"上游中转 → 目标代理"链路握手未通过'],
-      suggestions: ['到「代理池」页面点「诊断」定位哪一层挂了', '确认上游中转端口（如 socks5://127.0.0.1:7890）已在跑', '若目标代理要求白名单，确保中转出口 IP 已加白']
+      title: isEn ? 'Proxy Chain Failed' : '代理链建立失败',
+      reasons: isEn
+        ? ['Upstream relay → target proxy handshake failed']
+        : ['"上游中转 → 目标代理"链路握手未通过'],
+      suggestions: isEn
+        ? ['Go to Proxy Pool page and click "Diagnose" to locate which layer failed', 'Ensure upstream relay port (e.g. socks5://127.0.0.1:7890) is running', 'If target proxy requires whitelist, ensure relay egress IP is whitelisted']
+        : ['到「代理池」页面点「诊断」定位哪一层挂了', '确认上游中转端口（如 socks5://127.0.0.1:7890）已在跑', '若目标代理要求白名单，确保中转出口 IP 已加白']
     }
   }
-  // 严格代理（无可用代理拒绝裸奔）
+  // Strict proxy (no available proxy, refusing bare connection)
   if (e.includes('严格代理') || e.includes('strict') && e.includes('proxy')) {
     return {
       category: 'strict_proxy',
-      title: '严格代理模式拦截',
-      reasons: ['代理池启用了"绝不裸奔直连"，但当前无可用代理'],
-      suggestions: ['到代理池验活，确认至少 1 条 alive', '检查代理是否被自动停用', '临时可手动启用所有代理 / 关掉"失败自动停用"']
+      title: isEn ? 'Strict Proxy Mode Blocked' : '严格代理模式拦截',
+      reasons: isEn
+        ? ['Proxy pool has "never connect directly" enabled, but no proxy is available']
+        : ['代理池启用了"绝不裸奔直连"，但当前无可用代理'],
+      suggestions: isEn
+        ? ['Check proxy pool health, ensure at least 1 proxy is alive', 'Check if proxies were auto-disabled', 'Temporarily enable all proxies or disable "auto-disable on failure"']
+        : ['到代理池验活，确认至少 1 条 alive', '检查代理是否被自动停用', '临时可手动启用所有代理 / 关掉"失败自动停用"']
     }
   }
-  // EOF / status=0 网络抖动
+  // EOF / status=0 network glitch
   if (e.includes('eof') || (e.includes('status=0') && e.includes('failed to do request')) || e.includes('connection reset')) {
     return {
       category: 'eof',
-      title: '网络瞬时断开（EOF）',
-      reasons: ['TLS 连接在握手或传输中被对端 RST/关闭', '常见于代理不稳定 / 高并发挤压 / 中间网络抖动'],
-      suggestions: ['降低并发数', '换代理 / 加上游中转', '已内置重试，偶发可忽略；连续大量则更换出口']
+      title: isEn ? 'Network Disconnected (EOF)' : '网络瞬时断开（EOF）',
+      reasons: isEn
+        ? ['TLS connection was RST/closed by peer during handshake or transfer', 'Common with unstable proxy / high concurrency / network jitter']
+        : ['TLS 连接在握手或传输中被对端 RST/关闭', '常见于代理不稳定 / 高并发挤压 / 中间网络抖动'],
+      suggestions: isEn
+        ? ['Lower concurrency', 'Switch proxy / add upstream relay', 'Built-in retry handles occasional errors; frequent occurrences require switching exit']
+        : ['降低并发数', '换代理 / 加上游中转', '已内置重试，偶发可忽略；连续大量则更换出口']
     }
   }
-  // OTP 超时
+  // OTP timeout
   if ((e.includes('timeout') || e.includes('超时')) && (e.includes('otp') || e.includes('验证码') || e.includes('code'))) {
     return {
       category: 'otp_timeout',
-      title: '等待验证码超时',
-      reasons: ['临时邮箱未在期限内收到 AWS 验证邮件', '可能 AWS 没发（风控拦截）/ 邮件落到垃圾 / 临时邮箱服务延迟'],
-      suggestions: ['确认临时邮箱服务可用', '该邮箱域名可能被 AWS 标黑，换域名重试', '若反复出现，多半是 AWS 静默风控，需换 IP/换节奏']
+      title: isEn ? 'OTP Verification Timeout' : '等待验证码超时',
+      reasons: isEn
+        ? ['Temp email did not receive AWS verification email within the time limit', 'Possible: AWS did not send (risk control) / landed in spam / temp email service delay']
+        : ['临时邮箱未在期限内收到 AWS 验证邮件', '可能 AWS 没发（风控拦截）/ 邮件落到垃圾 / 临时邮箱服务延迟'],
+      suggestions: isEn
+        ? ['Verify temp email service is working', 'Email domain may be blacklisted by AWS, try a different domain', 'If recurring, likely silent risk control — change IP/pacing']
+        : ['确认临时邮箱服务可用', '该邮箱域名可能被 AWS 标黑，换域名重试', '若反复出现，多半是 AWS 静默风控，需换 IP/换节奏']
     }
   }
-  // 一般网络
+  // General network
   if (e.includes('timeout') || e.includes('超时') || e.includes('etimedout') || e.includes('fetch failed') || e.includes('econnreset') || e.includes('econnrefused') || e.includes('enotfound') || e.includes('network')) {
     return {
       category: 'network',
-      title: '网络错误',
-      reasons: ['连接 / DNS / 超时类失败'],
-      suggestions: ['检查本机网络与代理可达性', '降低并发再试']
+      title: isEn ? 'Network Error' : '网络错误',
+      reasons: isEn ? ['Connection / DNS / timeout failure'] : ['连接 / DNS / 超时类失败'],
+      suggestions: isEn ? ['Check local network and proxy reachability', 'Lower concurrency and retry'] : ['检查本机网络与代理可达性', '降低并发再试']
     }
   }
-  // 邮箱已被注册
+  // Email already registered
   if (e.includes('已注册') || (e.includes('email') && (e.includes('already') || e.includes('exists') || e.includes('used') || e.includes('已存在') || e.includes('已被')))) {
     return {
       category: 'email_used',
-      title: '邮箱已被注册',
-      reasons: ['该邮箱地址 AWS 侧已存在'],
-      suggestions: ['前缀生成器近期已增强随机性（中间名/双姓），再跑一次几乎不会撞', '使用多域名进一步降低冲突']
+      title: isEn ? 'Email Already Registered' : '邮箱已被注册',
+      reasons: isEn ? ['This email address already exists on AWS side'] : ['该邮箱地址 AWS 侧已存在'],
+      suggestions: isEn
+        ? ['Prefix generator has enhanced randomness (middle names/double surnames), retry should avoid collision', 'Use multiple domains to further reduce conflicts']
+        : ['前缀生成器近期已增强随机性（中间名/双姓），再跑一次几乎不会撞', '使用多域名进一步降低冲突']
     }
   }
-  // 限流
+  // Rate limit
   if (e.includes('rate') || e.includes('limit') || e.includes('too many') || e.includes('限流') || e.includes('429')) {
     return {
       category: 'rate_limit',
-      title: '触发限流',
-      reasons: ['短时请求次数超出 AWS 接受范围'],
-      suggestions: ['降低 maxPerMinute 与并发', '启用风控自动暂停']
+      title: isEn ? 'Rate Limited' : '触发限流',
+      reasons: isEn ? ['Too many requests in a short time exceeded AWS threshold'] : ['短时请求次数超出 AWS 接受范围'],
+      suggestions: isEn ? ['Lower maxPerMinute and concurrency', 'Enable risk control auto-pause'] : ['降低 maxPerMinute 与并发', '启用风控自动暂停']
     }
   }
   // suspended
   if (e.includes('suspended')) {
     return {
       category: 'suspended',
-      title: '账号已被停用',
-      reasons: ['注册流程跑完但 AWS 在最后一步把账号标为 suspended', '通常是风控级判定（域名/IP/指纹综合）'],
-      suggestions: ['换出口 IP / 换邮箱域名 / 降低速率', '可看作"软风控"信号，应立刻放慢']
+      title: isEn ? 'Account Suspended' : '账号已被停用',
+      reasons: isEn
+        ? ['Registration completed but AWS marked the account as suspended at the final step', 'Usually a risk control verdict (domain/IP/fingerprint combined)']
+        : ['注册流程跑完但 AWS 在最后一步把账号标为 suspended', '通常是风控级判定（域名/IP/指纹综合）'],
+      suggestions: isEn
+        ? ['Switch exit IP / switch email domain / lower rate', 'Treat as a "soft risk control" signal — slow down immediately']
+        : ['换出口 IP / 换邮箱域名 / 降低速率', '可看作"软风控"信号，应立刻放慢']
     }
   }
-  // 鉴权
+  // Auth
   if (e.includes('unauthorized') || e.includes('401') || e.includes('403')) {
     return {
       category: 'auth',
-      title: '鉴权失败',
-      reasons: ['上游接口返回 401/403'],
-      suggestions: ['检查凭据 / 看接口侧响应体']
+      title: isEn ? 'Authentication Failed' : '鉴权失败',
+      reasons: isEn ? ['Upstream API returned 401/403'] : ['上游接口返回 401/403'],
+      suggestions: isEn ? ['Check credentials / inspect API response body'] : ['检查凭据 / 看接口侧响应体']
     }
   }
-  return { category: 'unknown', title: '其他错误', reasons: [err || ''], suggestions: ['查看完整日志定位'] }
+  return { category: 'unknown', title: isEn ? 'Other Error' : '其他错误', reasons: [err || ''], suggestions: [isEn ? 'Check full logs to locate issue' : '查看完整日志定位'] }
 }
 
 /** 旧 API 兼容：现有 retryFailed 等用 classifyError 做筛选 */
@@ -269,6 +299,29 @@ const STEP_LABEL_CN: Record<RegStepName, string> = {
   'done': '完成'
 }
 
+const STEP_LABEL_EN: Record<RegStepName, string> = {
+  'init': 'Init',
+  'proxy-chain-ready': 'Proxy Ready',
+  'tls-ready': 'TLS Ready',
+  'exit-ip': 'Exit IP',
+  'oidc': 'OIDC',
+  'device': 'Device Auth',
+  'email-created': 'Email Created',
+  'portal': 'Portal',
+  'workflow-init': 'Workflow',
+  'submit-email': 'Submit Email',
+  'signup': 'Signup',
+  'send-otp': 'Send OTP',
+  'waiting-otp': 'Waiting OTP',
+  'otp-received': 'OTP Received',
+  'create-identity': 'Create ID',
+  'set-password': 'Set Password',
+  'sso-workflow': 'SSO Workflow',
+  'sso-token': 'Get Token',
+  'verify-alive': 'Verify',
+  'done': 'Done'
+}
+
 interface BatchItem {
   id: string
   index: number
@@ -306,10 +359,10 @@ function BatchItemRow({
   const isActive = item.status === 'running' || item.status === 'retrying'
   const now = isActive ? batchClock : (item.stepStartedAt || item.startedAt || 0)
   const totalMs = item.startedAt ? Math.max(0, now - item.startedAt) : undefined
-  const stepLabel = item.currentStep ? STEP_LABEL_CN[item.currentStep] : ''
+  const stepLabel = item.currentStep ? ((t('common.unknown') === 'Unknown') ? STEP_LABEL_EN[item.currentStep] : STEP_LABEL_CN[item.currentStep]) : ''
   const [diagOpen, setDiagOpen] = useState(false)
   const isFailed = item.status === 'failed' || item.status === 'import_failed'
-  const diag = isFailed && item.error ? diagnoseRegError(item.error) : null
+  const diag = isFailed && item.error ? diagnoseRegError(item.error, t('common.unknown') === 'Unknown') : null
 
   return (
     <div className="border-b last:border-b-0 text-xs hover:bg-muted/50 transition-colors">
@@ -353,9 +406,9 @@ function BatchItemRow({
             <button
               onClick={() => setDiagOpen((v) => !v)}
               className="ml-1 text-[10px] px-1.5 py-0.5 rounded border border-border bg-background hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-              title="查看原因与建议"
+              title={t('common.unknown') === 'Unknown' ? 'View causes & suggestions' : '查看原因与建议'}
             >
-              {diagOpen ? '收起' : '诊断'}
+              {diagOpen ? (t('common.unknown') === 'Unknown' ? 'Hide' : '收起') : (t('common.unknown') === 'Unknown' ? 'Diagnose' : '诊断')}
             </button>
           )}
         </div>
@@ -366,7 +419,7 @@ function BatchItemRow({
             <div className="font-medium text-red-700 dark:text-red-400 text-[11px]">{diag.title}</div>
             {diag.reasons.length > 0 && (
               <div className="text-[11px] text-foreground/80">
-                <div className="text-muted-foreground">可能原因：</div>
+                <div className="text-muted-foreground">{t('common.unknown') === 'Unknown' ? 'Possible causes:' : '可能原因：'}</div>
                 <ul className="list-disc pl-4 space-y-0.5">
                   {diag.reasons.map((r, i) => <li key={i}>{r}</li>)}
                 </ul>
@@ -374,7 +427,7 @@ function BatchItemRow({
             )}
             {diag.suggestions.length > 0 && (
               <div className="text-[11px] text-foreground/80">
-                <div className="text-muted-foreground">建议：</div>
+                <div className="text-muted-foreground">{t('common.unknown') === 'Unknown' ? 'Suggestions:' : '建议：'}</div>
                 <ul className="list-disc pl-4 space-y-0.5">
                   {diag.suggestions.map((s, i) => <li key={i}>{s}</li>)}
                 </ul>
@@ -1178,7 +1231,7 @@ export function RegisterPage(): React.JSX.Element {
     setParentEmail(c.manualParentEmail || '')
     setAnonymousEmail(c.manualAnonymousEmail ?? false)
     if (c.mixedEnabledSources) setMixedEnabledSources(c.mixedEnabledSources)
-    addLog(`[Template] 已应用模板：${tpl.name}`)
+    addLog(isEn ? `[Template] Applied template: ${tpl.name}` : `[Template] 已应用模板：${tpl.name}`)
     setShowTemplatesMenu(false)
   }, [addLog])
 
@@ -1194,11 +1247,11 @@ export function RegisterPage(): React.JSX.Element {
     const next = [tpl, ...templates]
     setTemplates(next)
     saveTemplates(next)
-    addLog(`[Template] 已保存模板：${name}`)
+    addLog(isEn ? `[Template] Saved template: ${name}` : `[Template] 已保存模板：${name}`)
   }, [collectCurrentConfig, templates, addLog])
 
   const removeTemplate = useCallback((id: string) => {
-    if (!confirm('确定删除这个模板？')) return
+    if (!confirm(isEn ? 'Are you sure you want to delete this template?' : '确定删除这个模板？')) return
     const next = templates.filter((t) => t.id !== id)
     setTemplates(next)
     saveTemplates(next)
@@ -1878,8 +1931,12 @@ export function RegisterPage(): React.JSX.Element {
     if (dailyQuotaLimit > 0) {
       const remainingQuota = Math.max(0, dailyQuotaLimit - dailyQuotaUsed)
       if (remainingQuota === 0) {
-        addLog(`[Quota] 今日配额已满 (${dailyQuotaUsed}/${dailyQuotaLimit})，跳过启动`)
-        alert(`今日注册配额已用完 (${dailyQuotaUsed}/${dailyQuotaLimit})`)
+        addLog(isEn
+          ? `[Quota] Daily quota reached (${dailyQuotaUsed}/${dailyQuotaLimit}), skipping`
+          : `[Quota] 今日配额已满 (${dailyQuotaUsed}/${dailyQuotaLimit})，跳过启动`)
+        alert(isEn
+          ? `Daily registration quota used up (${dailyQuotaUsed}/${dailyQuotaLimit})`
+          : `今日注册配额已用完 (${dailyQuotaUsed}/${dailyQuotaLimit})`)
         return
       }
       const want = retryItems ? retryItems.length : batchCount
@@ -2939,9 +2996,11 @@ export function RegisterPage(): React.JSX.Element {
                               }
                               setTemplates(dedup)
                               saveTemplates(dedup)
-                              addLog(`[Template] 已导入 ${arr.length} 个模板`)
+                              addLog(isEn ? `[Template] Imported ${arr.length} templates` : `[Template] 已导入 ${arr.length} 个模板`)
                             } catch (err) {
-                              alert(`导入失败：${err instanceof Error ? err.message : String(err)}`)
+                              alert(isEn
+                                ? `Import failed: ${err instanceof Error ? err.message : String(err)}`
+                                : `导入失败：${err instanceof Error ? err.message : String(err)}`)
                             }
                             e.currentTarget.value = ''
                           }}
