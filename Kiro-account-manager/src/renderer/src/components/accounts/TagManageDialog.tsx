@@ -10,22 +10,22 @@ interface TagManageDialogProps {
   onClose: () => void
 }
 
-// 预设颜色（带透明度）
+// Preset colors (with alpha)
 const PRESET_COLORS = [
-  { name: '红色', value: '#ffef4444' },
-  { name: '橙色', value: '#fff97316' },
-  { name: '黄色', value: '#ffeab308' },
-  { name: '绿色', value: '#ff22c55e' },
-  { name: '青色', value: '#ff06b6d4' },
-  { name: '蓝色', value: '#ff3b82f6' },
-  { name: '紫色', value: '#ff8b5cf6' },
-  { name: '粉色', value: '#ffec4899' },
-  { name: '灰色', value: '#ff6b7280' },
-  // 半透明版本
-  { name: '浅红', value: '#80ef4444' },
-  { name: '浅绿', value: '#8022c55e' },
-  { name: '浅蓝', value: '#803b82f6' },
-  { name: '浅紫', value: '#808b5cf6' },
+  { name: { en: 'Red', zh: '红色' }, value: '#ffef4444' },
+  { name: { en: 'Orange', zh: '橙色' }, value: '#fff97316' },
+  { name: { en: 'Yellow', zh: '黄色' }, value: '#ffeab308' },
+  { name: { en: 'Green', zh: '绿色' }, value: '#ff22c55e' },
+  { name: { en: 'Cyan', zh: '青色' }, value: '#ff06b6d4' },
+  { name: { en: 'Blue', zh: '蓝色' }, value: '#ff3b82f6' },
+  { name: { en: 'Purple', zh: '紫色' }, value: '#ff8b5cf6' },
+  { name: { en: 'Pink', zh: '粉色' }, value: '#ffec4899' },
+  { name: { en: 'Gray', zh: '灰色' }, value: '#ff6b7280' },
+  // Semi-transparent variants
+  { name: { en: 'Light Red', zh: '浅红' }, value: '#80ef4444' },
+  { name: { en: 'Light Green', zh: '浅绿' }, value: '#8022c55e' },
+  { name: { en: 'Light Blue', zh: '浅蓝' }, value: '#803b82f6' },
+  { name: { en: 'Light Purple', zh: '浅紫' }, value: '#808b5cf6' },
 ]
 
 // 解析 ARGB 颜色
@@ -124,8 +124,12 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
   const handleDelete = (id: string, name: string) => {
     const count = getTagAccountCount(id)
     const msg = count > 0
-      ? `确定要删除标签「${name}」吗？\n该标签已应用于 ${count} 个账号，删除后将从这些账号移除。`
-      : `确定要删除标签「${name}」吗？`
+      ? (isEn
+          ? `Are you sure you want to delete tag "${name}"?\nIt is applied to ${count} account(s) and will be removed from them.`
+          : `确定要删除标签「${name}」吗？\n该标签已应用于 ${count} 个账号，删除后将从这些账号移除。`)
+      : (isEn
+          ? `Are you sure you want to delete tag "${name}"?`
+          : `确定要删除标签「${name}」吗？`)
     if (confirm(msg)) {
       removeTag(id)
     }
@@ -220,7 +224,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
                       setNewColor(rgb)
                       setNewAlpha(alpha)
                     }}
-                    title={preset.name}
+                    title={isEn ? preset.name.en : preset.name.zh}
                   />
                 ))}
               </div>
@@ -299,17 +303,17 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
                             setEditColor(rgb)
                             setEditAlpha(alpha)
                           }}
-                          title={preset.name}
+                          title={isEn ? preset.name.en : preset.name.zh}
                         />
                       ))}
                     </div>
 
                     <div className="flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>
-                        取消
+                        {isEn ? 'Cancel' : '取消'}
                       </Button>
                       <Button size="sm" onClick={handleSaveEdit}>
-                        保存
+                        {isEn ? 'Save' : '保存'}
                       </Button>
                     </div>
                   </div>
@@ -323,7 +327,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
                       >
                         {tag.name}
                       </span>
-                      <span className="text-sm text-muted-foreground">- 选择要添加标签的账号</span>
+                      <span className="text-sm text-muted-foreground">{isEn ? '- Select accounts to tag' : '- 选择要添加标签的账号'}</span>
                     </div>
                     
                     {/* 已标记的账号 */}
@@ -371,7 +375,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
 
                     <div className="flex justify-end">
                       <Button variant="outline" size="sm" onClick={() => setAssigningTagId(null)}>
-                        完成
+                        {isEn ? 'Done' : '完成'}
                       </Button>
                     </div>
                   </div>
@@ -385,7 +389,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
                       {tag.name}
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      {getTagAccountCount(tag.id)} 个账号
+                      {isEn ? `${getTagAccountCount(tag.id)} accounts` : `${getTagAccountCount(tag.id)} 个账号`}
                     </span>
                     <div className="flex-1" />
                     <div className="flex items-center gap-1 shrink-0">

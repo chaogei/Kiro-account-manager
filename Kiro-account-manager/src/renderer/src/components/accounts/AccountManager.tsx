@@ -88,9 +88,9 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
 
   // 导入
   const handleImport = async (): Promise<void> => {
-    // 文件导入归入"当前打开的分组"（activeGroupTab 为真实分组时），否则未分组
+    // Import into current open group (if activeGroupTab is a real group), otherwise ungrouped
     const currentGroupId = (activeGroupTab !== 'all' && activeGroupTab !== 'ungrouped' && groups.has(activeGroupTab)) ? activeGroupTab : undefined
-    const groupName = currentGroupId ? (groups.get(currentGroupId)?.name ?? '未分组') : '未分组'
+    const groupName = currentGroupId ? (groups.get(currentGroupId)?.name ?? (isEn ? 'Ungrouped' : '未分组')) : (isEn ? 'Ungrouped' : '未分组')
     const fileData = await window.api.importFromFile()
 
     if (!fileData) return
@@ -99,21 +99,23 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
 
     try {
       if (format === 'json') {
-        // JSON 格式：完整导出数据
+        // JSON format: full export data
         const data = JSON.parse(content)
         if (data.version && data.accounts) {
           const result = importFromExportData(data)
           const skippedInfo = result.errors.find(e => e.id === 'skipped')
-          const skippedMsg = skippedInfo ? `，${skippedInfo.error}` : ''
-          alert(`导入完成：成功 ${result.success} 个${skippedMsg}`)
+          const skippedMsg = skippedInfo ? (isEn ? `, ${skippedInfo.error}` : `，${skippedInfo.error}`) : ''
+          alert(isEn
+            ? `Import complete: ${result.success} succeeded${skippedMsg}`
+            : `导入完成：成功 ${result.success} 个${skippedMsg}`)
         } else {
-          alert('无效的 JSON 文件格式')
+          alert(isEn ? 'Invalid JSON file format' : '无效的 JSON 文件格式')
         }
       } else if (format === 'csv') {
-        // CSV 格式：邮箱,昵称,登录方式,RefreshToken,ClientId,ClientSecret,Region
+        // CSV format
         const lines = content.split('\n').filter(line => line.trim())
         if (lines.length < 2) {
-          alert('CSV 文件为空或只有标题行')
+          alert(isEn ? 'CSV file is empty or only has a header row' : 'CSV 文件为空或只有标题行')
           return
         }
 
@@ -133,14 +135,16 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
         }).filter(item => item.email && item.refreshToken)
 
         if (items.length === 0) {
-          alert('未找到有效的账号数据（需要邮箱和 RefreshToken）')
+          alert(isEn ? 'No valid account data found (email and RefreshToken required)' : '未找到有效的账号数据（需要邮箱和 RefreshToken）')
           return
         }
 
         const result = importAccounts(items)
-        alert(`导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
+        alert(isEn
+          ? `Import complete: ${result.success} succeeded, ${result.failed} failed (group: ${groupName})`
+          : `导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
       } else if (format === 'txt') {
-        // TXT 格式：自动识别卡密格式或普通格式
+        // TXT format: auto-detect card key format or plain format
         const lines = content.split('\n').filter(line => line.trim() && !line.startsWith('#'))
 
         // 检测是否为卡密格式（包含 ---- 分隔符）
@@ -170,12 +174,16 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
           }).filter(item => item.email && item.refreshToken)
 
           if (items.length === 0) {
-            alert('未找到有效的卡密数据（格式：邮箱----密码----RefreshToken----ClientId----ClientSecret）')
+            alert(isEn
+              ? 'No valid card key data found (format: email----password----RefreshToken----ClientId----ClientSecret)'
+              : '未找到有效的卡密数据（格式：邮箱----密码----RefreshToken----ClientId----ClientSecret）')
             return
           }
 
           const result = importAccounts(items)
-          alert(`卡密导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
+          alert(isEn
+            ? `Card key import complete: ${result.success} succeeded, ${result.failed} failed (group: ${groupName})`
+            : `卡密导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
         } else {
           // 普通 TXT 格式：邮箱,RefreshToken 或 邮箱|RefreshToken
           const items = lines.map(line => {
@@ -190,19 +198,23 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
           }).filter(item => item.email && item.refreshToken)
 
           if (items.length === 0) {
-            alert('未找到有效的账号数据（格式：邮箱,RefreshToken 或 卡密格式：邮箱----密码----Token----ID----Secret）')
+            alert(isEn
+              ? 'No valid account data found (format: email,RefreshToken or card key: email----password----Token----ID----Secret)'
+              : '未找到有效的账号数据（格式：邮箱,RefreshToken 或 卡密格式：邮箱----密码----Token----ID----Secret）')
             return
           }
 
           const result = importAccounts(items)
-          alert(`导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
+          alert(isEn
+            ? `Import complete: ${result.success} succeeded, ${result.failed} failed (group: ${groupName})`
+            : `导入完成：成功 ${result.success} 个，失败 ${result.failed} 个（分组：${groupName}）`)
         }
       } else {
-        alert(`不支持的文件格式：${format}`)
+        alert(isEn ? `Unsupported file format: ${format}` : `不支持的文件格式：${format}`)
       }
     } catch (e) {
       console.error('Import error:', e)
-      alert('解析导入文件失败')
+      alert(isEn ? 'Failed to parse import file' : '解析导入文件失败')
     }
   }
 

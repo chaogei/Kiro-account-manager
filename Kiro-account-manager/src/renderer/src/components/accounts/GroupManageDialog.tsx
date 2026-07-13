@@ -77,8 +77,12 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
   const handleDelete = (id: string, name: string) => {
     const count = getGroupAccountCount(id)
     const msg = count > 0
-      ? `确定要删除分组「${name}」吗？\n该分组包含 ${count} 个账号，删除后这些账号将变为未分组状态。`
-      : `确定要删除分组「${name}」吗？`
+      ? (isEn
+          ? `Are you sure you want to delete group "${name}"?\nIt contains ${count} account(s) which will become ungrouped.`
+          : `确定要删除分组「${name}」吗？\n该分组包含 ${count} 个账号，删除后这些账号将变为未分组状态。`)
+      : (isEn
+          ? `Are you sure you want to delete group "${name}"?`
+          : `确定要删除分组「${name}」吗？`)
     if (confirm(msg)) {
       removeGroup(id)
     }
