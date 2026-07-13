@@ -835,7 +835,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
     clientSecret = regData.clientSecret
     console.log(`[SSO] Client registered: ${clientId.substring(0, 30)}...`)
   } catch (e) {
-    return { success: false, error: `注册客户端失败: ${e}` }
+    return { success: false, error: `Client registration failed: ${e}` }
   }
 
   // Step 2: 发起设备授权
@@ -853,7 +853,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
     interval = devData.interval || 1
     console.log(`[SSO] Device code obtained, user_code: ${userCode}`)
   } catch (e) {
-    return { success: false, error: `设备授权失败: ${e}` }
+    return { success: false, error: `Device authorization failed: ${e}` }
   }
 
   // Step 3: 验证 Bearer Token (whoAmI)
@@ -866,7 +866,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
     if (!whoRes.ok) throw new Error(`whoAmI failed: ${whoRes.status}`)
     console.log('[SSO] Bearer token verified')
   } catch (e) {
-    return { success: false, error: `Token 验证失败: ${e}` }
+    return { success: false, error: `Token verification failed: ${e}` }
   }
 
   // Step 4: 获取设备会话令牌
@@ -882,7 +882,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
     deviceSessionToken = sessData.token
     console.log('[SSO] Device session token obtained')
   } catch (e) {
-    return { success: false, error: `获取设备会话失败: ${e}` }
+    return { success: false, error: `Failed to get device session: ${e}` }
   }
 
   // Step 5: 接受用户代码
@@ -899,7 +899,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
     deviceContext = acceptData.deviceContext || null
     console.log('[SSO] User code accepted')
   } catch (e) {
-    return { success: false, error: `接受用户代码失败: ${e}` }
+    return { success: false, error: `Failed to accept user code: ${e}` }
   }
 
   // Step 6: 批准授权
@@ -921,7 +921,7 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
       if (!approveRes.ok) throw new Error(`Approve failed: ${approveRes.status}`)
       console.log('[SSO] Authorization approved')
     } catch (e) {
-      return { success: false, error: `批准授权失败: ${e}` }
+      return { success: false, error: `Authorization approval failed: ${e}` }
     }
   }
 

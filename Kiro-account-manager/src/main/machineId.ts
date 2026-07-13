@@ -100,12 +100,12 @@ export async function getCurrentMachineId(): Promise<MachineIdResult> {
       case 'linux':
         return await getLinuxMachineId()
       default:
-        return { success: false, error: '不支持的操作系统' }
+        return { success: false, error: 'Unsupported operating system' }
     }
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : '获取机器码失败'
+      error: error instanceof Error ? error.message : 'Failed to get machine ID'
     }
   }
 }
@@ -118,7 +118,7 @@ export async function setMachineId(newMachineId: string): Promise<MachineIdResul
 
   // 验证机器码格式
   if (!isValidMachineId(newMachineId)) {
-    return { success: false, error: '无效的机器码格式' }
+    return { success: false, error: 'Invalid machine ID format' }
   }
 
   try {
@@ -130,10 +130,10 @@ export async function setMachineId(newMachineId: string): Promise<MachineIdResul
       case 'linux':
         return await setLinuxMachineId(newMachineId)
       default:
-        return { success: false, error: '不支持的操作系统' }
+        return { success: false, error: 'Unsupported operating system' }
     }
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : '设置机器码失败'
+    const errorMsg = error instanceof Error ? error.message : 'Failed to set machine ID'
     // 检查是否需要管理员权限
     if (
       errorMsg.includes('Access is denied') ||

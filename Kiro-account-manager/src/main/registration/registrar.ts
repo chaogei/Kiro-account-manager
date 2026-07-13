@@ -163,7 +163,7 @@ export class Registrar {
   }
 
   private checkAborted(): void {
-    if (this.abortController.signal.aborted) throw new Error('注册已取消')
+    if (this.abortController.signal.aborted) throw new Error('Registration cancelled')
   }
 
   /**
@@ -190,7 +190,7 @@ export class Registrar {
             this.emitStep('exit-ip', { exitIp: ip })
           }
           const via = proxyUrl ? proxyUrl.replace(/:([^:@/]+)@/, ':***@') : undefined
-          this.log(`[✓ IP] 出口 IP: ${ip || '未知'}${via ? ` (via ${via})` : ' (直连)'}`)
+          this.log(`[✓ IP] Exit IP: ${ip || 'unknown'}${via ? ` (via ${via})` : ' (direct)'}`)
           return // 成功，退出
         }
         this.log(`[IP] 出口 IP 检测失败: HTTP ${resp.status}`)
@@ -257,7 +257,7 @@ export class Registrar {
     // 严格模式：必须有显式代理，禁止回退到环境变量/系统代理，防止裸奔真实 IP
     if (this.cfg.strictProxy) {
       if (!explicit) {
-        throw new Error('严格代理模式：cfg.proxy 为空，已中止以防止裸奔直连')
+        throw new Error('Strict proxy mode: cfg.proxy is empty, aborting to prevent direct connection')
       }
     }
     const proxyUrl = this.cfg.strictProxy
@@ -554,7 +554,7 @@ export class Registrar {
               await this.rebuildTlsClient()
             }
           } else {
-            this.log(`[Net] ${method} 瞬时失败 status=${status}，${broken ? '重建 TLS + ' : ''}退避重试 ${attempt}/${maxAttempts - 1}`)
+            this.log(`[Net] ${method} failed status=${status}, ${broken ? 'rebuild TLS + ' : ''}backoff retry ${attempt}/${maxAttempts - 1}`)
             if (broken) await this.rebuildTlsClient()
           }
           await this.abortableSleep(this.netBackoffMs(attempt))
@@ -580,9 +580,9 @@ export class Registrar {
   private abortableSleep(ms: number): Promise<void> {
     const signal = this.abortController.signal
     return new Promise((resolve, reject) => {
-      if (signal.aborted) { reject(new Error('注册已取消')); return }
+      if (signal.aborted) { reject(new Error('Registration cancelled')); return }
       let timer: ReturnType<typeof setTimeout>
-      const onAbort = (): void => { clearTimeout(timer); reject(new Error('注册已取消')) }
+      const onAbort = (): void => { clearTimeout(timer); reject(new Error('Registration cancelled')) }
       timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
       signal.addEventListener('abort', onAbort, { once: true })
     })

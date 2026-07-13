@@ -76,8 +76,8 @@ export class ChainProxyRelay {
   constructor(upstreamUrl: string, targetUrl: string, log?: (m: string) => void) {
     const up = parseChainProxy(upstreamUrl)
     const tg = parseChainProxy(targetUrl)
-    if (!up) throw new Error(`上游中转代理无效: ${upstreamUrl}`)
-    if (!tg) throw new Error(`目标代理无效: ${targetUrl}`)
+    if (!up) throw new Error(`Invalid upstream relay proxy: ${upstreamUrl}`)
+    if (!tg) throw new Error(`Invalid target proxy: ${targetUrl}`)
     this.upstream = up
     this.target = tg
     this.log = log || ((): void => {})
@@ -96,7 +96,7 @@ export class ChainProxyRelay {
           server.removeListener('error', reject)
           resolve(`http://127.0.0.1:${this.port}`)
         } else {
-          reject(new Error('本地中继启动失败：无法获取端口'))
+          reject(new Error('Local relay failed to start: unable to get port'))
         }
       })
     })
