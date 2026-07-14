@@ -23,7 +23,8 @@ import {
   parseAccessTokenClaims,
   watchKiroAuthTokenFile,
   resolveProfileArnForWrite,
-  KIRO_AUTH_TOKEN_PATH
+  KIRO_AUTH_TOKEN_PATH,
+  KIRO_SOCIAL_PROFILE_ARN
 } from './kiroAuthSync'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
@@ -2441,8 +2442,8 @@ app.whenReady().then(async () => {
   // 见 syncIdeTokenChangeToStore 注释
   startKiroAuthTokenWatcher()
 
-  // 注册自定义协议
-  registerProtocol()
+  // Keep Kiro IDE as the default kiro:// handler during normal app usage.
+  // Account Manager only claims the scheme temporarily for its own social login.
 
   // 加载托盘设置并初始化托盘
   await loadTraySettings()
@@ -4844,8 +4845,8 @@ app.whenReady().then(async () => {
     }
   })
 
-  // IPC: 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
-  // kiro-cli 使用 ~/.local/share/kiro-cli/data.sqlite3 中的 auth_kv 表
+  // IPC: 切换账号到 Kiro CLI - 写入凭证到 SQLite auth_kv
+  // macOS path MUST be ~/Library/Application Support/kiro-cli/data.sqlite3 (Rust dirs::data_dir)
   ipcMain.handle('switch-account-cli', async (_event, credentials: {
     accessToken: string
     refreshToken: string
@@ -4854,7 +4855,10 @@ app.whenReady().then(async () => {
     region?: string
     profileArn?: string
     provider?: string
+    authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
+    /** When true, write tokens as-is (already refreshed by IDE switch). Avoids double-rotate. */
+    skipRefresh?: boolean
   }) => {
     const os = await import('os')
     const path = await import('path')
@@ -4862,119 +4866,195 @@ app.whenReady().then(async () => {
 
     try {
       const {
-        refreshToken,
         clientId,
         clientSecret,
         region = 'us-east-1',
         profileArn,
-        provider,
         scopes
       } = credentials
-      let { accessToken } = credentials
+      let finalAccessToken = credentials.accessToken
+      let finalRefreshToken = credentials.refreshToken
+      let finalExpiresIn = 3600
 
-      // 切号前先刷新 token（和 IDE 切号一致）
-      if (refreshToken) {
-        const authMethod = (provider === 'Google' || provider === 'Github') ? 'social' : undefined
-        console.log(`[Switch CLI] Refreshing token before switch (provider: ${provider})...`)
-        const refreshResult = await refreshTokenByMethod(refreshToken, clientId || '', clientSecret || '', region, authMethod)
+      // Gmail/Google Workspace accounts often store provider as "google" (lowercase)
+      // or only set authMethod=social. Strict === 'Google' mis-classifies them as IdC
+      // and writes kirocli:odic:token → CLI broken while IDE (uses authMethod) works.
+      const providerRaw = (credentials.provider || '').trim()
+      const providerNorm = providerRaw.toLowerCase()
+      const authMethodRaw = (credentials.authMethod || '').trim()
+      const isSocial =
+        authMethodRaw === 'social' ||
+        providerNorm === 'google' ||
+        providerNorm === 'github'
+      const authMethod = isSocial ? 'social' : 'IdC'
+      // kiro-cli SocialToken expects provider casing Google/Github (empirically verified)
+      const providerForCli =
+        providerNorm === 'github' ? 'Github' : isSocial ? 'Google' : providerRaw || 'BuilderId'
+
+      // Align with IDE switch: refresh first, rotate refresh_token, abort on failure.
+      // skipRefresh=true when IDE switch already rotated (Both target) — second refresh
+      // would invalidate the token just written to IDE disk / store.
+      if (finalRefreshToken && !credentials.skipRefresh) {
+        console.log(
+          `[Switch CLI] Refreshing token before switch (provider: ${providerForCli}, isSocial: ${isSocial})...`
+        )
+        const refreshResult = await refreshTokenByMethod(
+          finalRefreshToken,
+          clientId || '',
+          clientSecret || '',
+          region,
+          isSocial ? 'social' : undefined
+        )
         if (refreshResult.success && refreshResult.accessToken) {
-          accessToken = refreshResult.accessToken
-          console.log('[Switch CLI] Token refreshed successfully')
+          finalAccessToken = refreshResult.accessToken
+          finalRefreshToken = refreshResult.refreshToken || finalRefreshToken
+          finalExpiresIn = refreshResult.expiresIn ?? 3600
+          console.log('[Switch CLI] Token refreshed successfully (rotated refreshToken updated)')
         } else {
-          console.warn(`[Switch CLI] Token refresh failed: ${refreshResult.error}, using existing token`)
+          const errMsg = refreshResult.error || 'Unknown refresh error'
+          console.warn(`[Switch CLI] Token refresh failed, aborting switch: ${errMsg}`)
+          return {
+            success: false,
+            error: `刷新 Token 失败，未写入 kiro-cli SQLite，避免半坏 token。原因：${errMsg}`
+          }
         }
+      } else if (credentials.skipRefresh) {
+        console.log('[Switch CLI] skipRefresh=true — writing caller-provided tokens without OIDC refresh')
       }
 
-      // kiro-cli SQLite 数据库路径
-      // Windows: %LOCALAPPDATA%\kiro-cli\data.sqlite3
-      // macOS/Linux: ~/.local/share/kiro-cli/data.sqlite3
       const dataDir = process.platform === 'win32'
         ? path.join(os.homedir(), 'AppData', 'Local', 'kiro-cli')
-        : path.join(os.homedir(), '.local', 'share', 'kiro-cli')
+        : process.platform === 'darwin'
+          ? path.join(os.homedir(), 'Library', 'Application Support', 'kiro-cli')
+          : path.join(os.homedir(), '.local', 'share', 'kiro-cli')
       await mkdir(dataDir, { recursive: true })
       const dbPath = path.join(dataDir, 'data.sqlite3')
 
-      // 判断 token key：social 登录用 social:token，IdC 登录用 odic:token
-      const isSocial = provider === 'Google' || provider === 'Github'
       const preferredTokenKey = isSocial ? 'kirocli:social:token' : 'kirocli:odic:token'
       const preferredRegKey = 'kirocli:odic:device-registration'
 
-      // profileArn 决策统一由 helper：BuilderId 不带 profileArn
-      // kiro-cli 同样不应该在 SQLite 里塞占位符 ARN（实测会触发 REST 端点 403）
       const resolvedProfileArn = resolveProfileArnForWrite({
         profileArn,
-        authMethod: isSocial ? 'social' : 'IdC',
-        provider,
+        authMethod,
+        provider: providerForCli,
         region
       })
 
-      // 构建 token JSON（snake_case 字段名，与 kiro-cli Rust 结构一致）
-      const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString()
+      // kiro-cli ≥2.12:
+      // - SocialToken REQUIRES `provider` (Google/Github). Without it whoami/chat
+      //   report "Not logged in" even when access/refresh/profile_arn are present.
+      // - IdC/BuilderId requires oauth_flow (+ device-registration fields)
+      const expiresAt = new Date(Date.now() + finalExpiresIn * 1000).toISOString()
       const tokenData: Record<string, unknown> = {
-        access_token: accessToken,
-        refresh_token: refreshToken,
+        access_token: finalAccessToken,
+        refresh_token: finalRefreshToken,
         expires_at: expiresAt,
         region
       }
-      // profileArn 仅在解析出有效值时附加，BuilderId 等不带（避免 kiro-cli 拿占位符 ARN 调 REST 触发 403）
-      if (resolvedProfileArn) {
-        tokenData.profile_arn = resolvedProfileArn
+      if (isSocial) {
+        tokenData.provider = providerForCli // "Google" | "Github"
+        // Always pin social profile ARN — empty/wrong ARN → "dispatch failure" / invalid social token
+        tokenData.profile_arn = resolvedProfileArn || KIRO_SOCIAL_PROFILE_ARN
+      } else {
+        tokenData.oauth_flow = 'DeviceCode'
+        tokenData.start_url = 'https://view.awsapps.com/start'
+        if (resolvedProfileArn) {
+          tokenData.profile_arn = resolvedProfileArn
+        }
       }
       if (scopes) tokenData.scopes = scopes
 
-      // 使用 sqlite3 命令行操作（跨平台兼容，无需原生模块编译）
-      const { execFileSync } = await import('child_process')
-      const sqlite3Bin = process.platform === 'win32' ? 'sqlite3.exe' : 'sqlite3'
-
-      // 构建 SQL 语句
-      const sqlStatements: string[] = [
-        'CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT);',
-        `INSERT OR REPLACE INTO auth_kv (key, value) VALUES ('${preferredTokenKey}', '${JSON.stringify(tokenData).replace(/'/g, "''")}');`
+      const kvRows: Array<{ key: string; value: string }> = [
+        { key: preferredTokenKey, value: JSON.stringify(tokenData) }
       ]
 
-      // 写入 device-registration（仅 IdC 登录）
       if (clientId && clientSecret && !isSocial) {
-        const regData = { client_id: clientId, client_secret: clientSecret, region }
-        sqlStatements.push(
-          `INSERT OR REPLACE INTO auth_kv (key, value) VALUES ('${preferredRegKey}', '${JSON.stringify(regData).replace(/'/g, "''")}');`
-        )
-      }
-
-      // 清除其他优先级的旧 key
-      const cliTokenKeys = ['kirocli:social:token', 'kirocli:odic:token', 'codewhisperer:odic:token']
-      for (const key of cliTokenKeys) {
-        if (key !== preferredTokenKey) {
-          sqlStatements.push(`DELETE FROM auth_kv WHERE key = '${key}';`)
+        const regData: Record<string, unknown> = {
+          client_id: clientId,
+          client_secret: clientSecret,
+          client_secret_expires_at: new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString(),
+          region,
+          oauth_flow: 'DeviceCode'
         }
+        if (scopes) regData.scopes = scopes
+        kvRows.push({ key: preferredRegKey, value: JSON.stringify(regData) })
       }
 
+      // Clear every competing auth key so kiro-cli cannot prefer a stale Google/IdC session
+      const staleTokenKeys = [
+        'kirocli:social:token',
+        'kirocli:odic:token',
+        'codewhisperer:odic:token',
+        'kirocli:external-idp:token'
+      ].filter((k) => k !== preferredTokenKey)
+
+      // Prefer parameterized writes (token JSON may contain quotes); fall back to sqlite3 CLI
+      let wrote = false
       try {
-        execFileSync(sqlite3Bin, [dbPath], {
-          input: sqlStatements.join('\n'),
-          timeout: 10000,
-          encoding: 'utf-8'
-        })
-      } catch (sqlite3Error) {
-        // sqlite3 命令不存在，尝试用 Node.js 22+ 的内置 SQLite
-        console.log('[Switch CLI] sqlite3 command not available, trying Node.js built-in SQLite...')
-        try {
-          const { DatabaseSync } = await import('node:sqlite') as { DatabaseSync: new (path: string) => { exec: (sql: string) => void; close: () => void } }
-          const db = new DatabaseSync(dbPath)
-          try {
-            for (const sql of sqlStatements) {
-              db.exec(sql)
-            }
-          } finally {
-            db.close()
+        const { DatabaseSync } = (await import('node:sqlite')) as {
+          DatabaseSync: new (path: string) => {
+            exec: (sql: string) => void
+            prepare: (sql: string) => { run: (...params: unknown[]) => void }
+            close: () => void
           }
-        } catch {
-          throw new Error(`SQLite 操作失败: sqlite3 命令不可用 (${(sqlite3Error as Error).message})，且 Node.js 内置 SQLite 不支持。请确保系统安装了 sqlite3 命令行工具。`)
+        }
+        const db = new DatabaseSync(dbPath)
+        try {
+          db.exec('CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT);')
+          const upsert = db.prepare('INSERT OR REPLACE INTO auth_kv (key, value) VALUES (?, ?)')
+          for (const row of kvRows) upsert.run(row.key, row.value)
+          const del = db.prepare('DELETE FROM auth_kv WHERE key = ?')
+          for (const key of staleTokenKeys) del.run(key)
+          // Social switch must not leave a stale IdC registration that kiro-cli may try to parse first
+          if (isSocial) {
+            del.run(preferredRegKey)
+          }
+          wrote = true
+        } finally {
+          db.close()
+        }
+      } catch (nodeSqliteErr) {
+        console.warn('[Switch CLI] node:sqlite unavailable, falling back to sqlite3 CLI:', nodeSqliteErr)
+      }
+
+      if (!wrote) {
+        const { execFileSync } = await import('child_process')
+        const sqlite3Bin = process.platform === 'win32' ? 'sqlite3.exe' : 'sqlite3'
+        const sqlEscape = (s: string): string => s.replace(/'/g, "''")
+        const sqlStatements: string[] = [
+          'CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT);',
+          ...kvRows.map(
+            (row) =>
+              `INSERT OR REPLACE INTO auth_kv (key, value) VALUES ('${sqlEscape(row.key)}', '${sqlEscape(row.value)}');`
+          ),
+          ...staleTokenKeys.map((key) => `DELETE FROM auth_kv WHERE key = '${sqlEscape(key)}';`),
+          ...(isSocial ? [`DELETE FROM auth_kv WHERE key = '${sqlEscape(preferredRegKey)}';`] : [])
+        ]
+        try {
+          execFileSync(sqlite3Bin, [dbPath], {
+            input: sqlStatements.join('\n'),
+            timeout: 10000,
+            encoding: 'utf-8'
+          })
+          wrote = true
+        } catch (sqlite3Error) {
+          throw new Error(
+            `SQLite 写入 kiro-cli 失败: ${(sqlite3Error as Error).message}。请确认已安装 sqlite3，且路径可写: ${dbPath}`
+          )
         }
       }
 
       console.log(`[Switch CLI] Token saved to SQLite key: ${preferredTokenKey}`)
       console.log(`[Switch CLI] Account switched successfully in ${dbPath}`)
-      return { success: true, dbPath }
+      return {
+        success: true,
+        dbPath,
+        refreshedCredentials: {
+          accessToken: finalAccessToken,
+          refreshToken: finalRefreshToken,
+          expiresIn: finalExpiresIn
+        }
+      }
     } catch (error) {
       console.error('[Switch CLI] Error:', error)
       return { success: false, error: error instanceof Error ? error.message : 'CLI 切换失败' }
@@ -5503,6 +5583,8 @@ app.whenReady().then(async () => {
       provider
     }
 
+    registerProtocol()
+
     const urlStr = loginUrl.toString()
     console.log(`[Login] Opening browser for ${provider} login...`)
 
@@ -5525,12 +5607,14 @@ app.whenReady().then(async () => {
     console.log('[Login] Exchanging Social Auth token...')
 
     if (!currentLoginState || currentLoginState.type !== 'social') {
+      unregisterProtocol()
       return { success: false, error: '没有进行中的社交登录' }
     }
 
     // 验证 state
     if (state !== currentLoginState.oauthState) {
       currentLoginState = null
+      unregisterProtocol()
       return { success: false, error: '状态参数不匹配，可能存在安全风险' }
     }
 
@@ -5551,6 +5635,7 @@ app.whenReady().then(async () => {
       if (!tokenRes.ok) {
         const errText = await tokenRes.text()
         currentLoginState = null
+        unregisterProtocol()
         return { success: false, error: `Token 交换失败: ${errText}` }
       }
 
@@ -5568,10 +5653,12 @@ app.whenReady().then(async () => {
       }
 
       currentLoginState = null
+      unregisterProtocol()
       return result
     } catch (error) {
       console.error('[Login] Token exchange error:', error)
       currentLoginState = null
+      unregisterProtocol()
       return { success: false, error: error instanceof Error ? error.message : 'Token 交换失败' }
     }
   })
@@ -5580,6 +5667,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('cancel-social-login', async () => {
     console.log('[Login] Cancelling Social Auth login...')
     currentLoginState = null
+    unregisterProtocol()
     return { success: true }
   })
 
@@ -7207,6 +7295,7 @@ app.whenReady().then(async () => {
             mainWindow.webContents.send('social-auth-callback', { error })
             mainWindow.focus()
           }
+          unregisterProtocol()
           return
         }
 

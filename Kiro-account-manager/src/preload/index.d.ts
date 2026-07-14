@@ -243,8 +243,19 @@ interface KiroApi {
     region?: string
     profileArn?: string
     provider?: string
+    authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
-  }) => Promise<{ success: boolean; error?: string; dbPath?: string }>
+    skipRefresh?: boolean
+  }) => Promise<{
+    success: boolean
+    error?: string
+    dbPath?: string
+    refreshedCredentials?: {
+      accessToken: string
+      refreshToken: string
+      expiresIn: number
+    }
+  }>
 
   // 退出登录 - 清除本地 SSO 缓存
   logoutAccount: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>

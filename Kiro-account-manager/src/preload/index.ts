@@ -174,8 +174,19 @@ const api = {
     region?: string
     profileArn?: string
     provider?: string
+    authMethod?: 'IdC' | 'social' | string
     scopes?: string[]
-  }): Promise<{ success: boolean; error?: string; dbPath?: string }> => {
+    skipRefresh?: boolean
+  }): Promise<{
+    success: boolean
+    error?: string
+    dbPath?: string
+    refreshedCredentials?: {
+      accessToken: string
+      refreshToken: string
+      expiresIn: number
+    }
+  }> => {
     return ipcRenderer.invoke('switch-account-cli', credentials)
   },
 
