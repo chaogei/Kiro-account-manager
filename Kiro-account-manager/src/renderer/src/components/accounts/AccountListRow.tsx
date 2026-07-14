@@ -147,61 +147,76 @@ function AccountListRowComponent({
       return
     }
 
-    const cliPayload = {
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId,
-      clientSecret: credentials.clientSecret,
-      region: credentials.region || 'us-east-1',
-      profileArn: account.profileArn,
-      provider: credentials.provider
-    }
-    const idePayload = {
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId || '',
-      clientSecret: credentials.clientSecret || '',
-      region: credentials.region || 'us-east-1',
-      startUrl: credentials.startUrl,
-      authMethod: credentials.authMethod,
-      provider: credentials.provider,
-      profileArn: account.profileArn,
-      accountId: account.id
-    }
+    // Keep one live token pair across IDE+CLI (rotating refresh). See AccountCard.
+    let liveAccess = credentials.accessToken
+    let liveRefresh = credentials.refreshToken
 
     let success = true
     let errorMsg = ''
     const target = switchTarget || 'ide'
+
+    const applyRefreshed = (rc: { accessToken: string; refreshToken: string; expiresIn: number }): void => {
+      liveAccess = rc.accessToken
+      liveRefresh = rc.refreshToken
+      useAccountsStore.setState((state) => {
+        const accounts = new Map(state.accounts)
+        const acc = accounts.get(account.id)
+        if (acc) {
+          accounts.set(account.id, {
+            ...acc,
+            credentials: {
+              ...acc.credentials,
+              accessToken: rc.accessToken,
+              refreshToken: rc.refreshToken,
+              expiresAt: Date.now() + rc.expiresIn * 1000
+            }
+          })
+        }
+        return { accounts }
+      })
+      useAccountsStore.getState().saveToStorage()
+    }
+
     if (target === 'ide' || target === 'both') {
-      const result = await window.api.switchAccount(idePayload)
+      const result = await window.api.switchAccount({
+        accessToken: liveAccess,
+        refreshToken: liveRefresh,
+        clientId: credentials.clientId || '',
+        clientSecret: credentials.clientSecret || '',
+        region: credentials.region || 'us-east-1',
+        startUrl: credentials.startUrl,
+        authMethod: credentials.authMethod,
+        provider: credentials.provider,
+        profileArn: account.profileArn,
+        accountId: account.id
+      })
       if (!result.success) {
         success = false
         errorMsg = result.error || ''
       } else if (result.refreshedCredentials) {
-        // 同步 main 进程 refresh 后的最新 credentials 到 store，避免反代 store 留下已作废的 refreshToken
-        const rc = result.refreshedCredentials
-        useAccountsStore.setState((state) => {
-          const accounts = new Map(state.accounts)
-          const acc = accounts.get(account.id)
-          if (acc) {
-            accounts.set(account.id, {
-              ...acc,
-              credentials: {
-                ...acc.credentials,
-                accessToken: rc.accessToken,
-                refreshToken: rc.refreshToken,
-                expiresAt: Date.now() + rc.expiresIn * 1000
-              }
-            })
-          }
-          return { accounts }
-        })
-        useAccountsStore.getState().saveToStorage()
+        applyRefreshed(result.refreshedCredentials)
       }
     }
-    if (target === 'cli' || target === 'both') {
-      const result = await window.api.switchAccountCli(cliPayload)
-      if (!result.success && target === 'cli') { success = false; errorMsg = result.error || '' }
+    if ((target === 'cli' || target === 'both') && success) {
+      const ideAlreadyRefreshed = target === 'both'
+      const result = await window.api.switchAccountCli({
+        accessToken: liveAccess,
+        refreshToken: liveRefresh,
+        clientId: credentials.clientId,
+        clientSecret: credentials.clientSecret,
+        region: credentials.region || 'us-east-1',
+        profileArn: account.profileArn,
+        provider: credentials.provider,
+        authMethod: credentials.authMethod,
+        skipRefresh: ideAlreadyRefreshed
+      })
+      if (!result.success) {
+        success = false
+        const cliErr = result.error || 'CLI switch failed'
+        errorMsg = errorMsg ? `${errorMsg}; CLI: ${cliErr}` : cliErr
+      } else if (result.refreshedCredentials) {
+        applyRefreshed(result.refreshedCredentials)
+      }
     }
 
     if (success) {

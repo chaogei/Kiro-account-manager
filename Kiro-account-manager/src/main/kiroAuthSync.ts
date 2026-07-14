@@ -72,7 +72,12 @@ export function resolveProfileArnForWrite(input: {
   if (input.profileArn && !isPlaceholderProfileArn(input.profileArn)) {
     return input.profileArn
   }
-  if (input.authMethod === 'social' || input.provider === 'Github' || input.provider === 'Google') {
+  const providerNorm = (input.provider || '').toLowerCase()
+  if (
+    input.authMethod === 'social' ||
+    providerNorm === 'github' ||
+    providerNorm === 'google'
+  ) {
     return KIRO_SOCIAL_PROFILE_ARN
   }
   // Enterprise 不能用 BuilderId 占位符（IDE 调接口会 Invalid token）
@@ -164,6 +169,24 @@ export async function writeKiroAuthTokenFile(
     /* ignore */
   }
 
+  // Keep kiro-cli social session in lockstep with IDE for Google/Github.
+  // Without this, Both-target double-refresh or partial CLI writes leave CLI
+  // with a dead access token → chat "dispatch failure" while IDE still works.
+  if (input.authMethod === 'social') {
+    try {
+      await syncSocialTokenToKiroCli({
+        accessToken: input.accessToken,
+        refreshToken: input.refreshToken,
+        expiresAtIso: input.expiresAtIso,
+        provider: input.provider,
+        profileArn: input.profileArn || KIRO_SOCIAL_PROFILE_ARN,
+        region: input.region || 'us-east-1'
+      })
+    } catch (e) {
+      console.warn('[kiroAuthSync] syncSocialTokenToKiroCli failed:', e)
+    }
+  }
+
   let clientRegPath: string | undefined
   if (input.authMethod !== 'social' && input.clientId && input.clientSecret) {
     clientRegPath = path.join(KIRO_SSO_CACHE_DIR, `${clientIdHash}.json`)
@@ -195,6 +218,94 @@ export async function readKiroAuthTokenFile(): Promise<KiroAuthTokenFile | null>
   } catch {
     return null
   }
+}
+
+/** macOS/Linux/Windows path for kiro-cli data.sqlite3 (Rust dirs::data_dir) */
+export function getKiroCliDataDir(): string {
+  if (process.platform === 'win32') {
+    return path.join(os.homedir(), 'AppData', 'Local', 'kiro-cli')
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'kiro-cli')
+  }
+  return path.join(os.homedir(), '.local', 'share', 'kiro-cli')
+}
+
+/**
+ * Write Google/Github session into kiro-cli auth_kv in the shape kiro-cli 2.12 accepts.
+ * Must include provider (Google/Github) + profile_arn or whoami/chat fail.
+ */
+export async function syncSocialTokenToKiroCli(input: {
+  accessToken: string
+  refreshToken: string
+  expiresAtIso: string
+  provider?: string
+  profileArn?: string
+  region?: string
+}): Promise<{ dbPath: string }> {
+  const dataDir = getKiroCliDataDir()
+  await fs.mkdir(dataDir, { recursive: true })
+  const dbPath = path.join(dataDir, 'data.sqlite3')
+
+  const providerNorm = (input.provider || 'Google').toLowerCase()
+  const provider = providerNorm === 'github' ? 'Github' : 'Google'
+  const profileArn = input.profileArn || KIRO_SOCIAL_PROFILE_ARN
+  const region = input.region || 'us-east-1'
+
+  const tokenData = {
+    access_token: input.accessToken,
+    refresh_token: input.refreshToken,
+    expires_at: input.expiresAtIso,
+    provider,
+    profile_arn: profileArn,
+    region
+  }
+  const tokenJson = JSON.stringify(tokenData)
+  const preferredKey = 'kirocli:social:token'
+  const staleKeys = [
+    'kirocli:odic:token',
+    'codewhisperer:odic:token',
+    'kirocli:external-idp:token',
+    'kirocli:odic:device-registration'
+  ]
+
+  let wrote = false
+  try {
+    const { DatabaseSync } = (await import('node:sqlite')) as {
+      DatabaseSync: new (path: string) => {
+        exec: (sql: string) => void
+        prepare: (sql: string) => { run: (...params: unknown[]) => void }
+        close: () => void
+      }
+    }
+    const db = new DatabaseSync(dbPath)
+    try {
+      db.exec('CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT);')
+      db.prepare('INSERT OR REPLACE INTO auth_kv (key, value) VALUES (?, ?)').run(preferredKey, tokenJson)
+      const del = db.prepare('DELETE FROM auth_kv WHERE key = ?')
+      for (const k of staleKeys) del.run(k)
+      wrote = true
+    } finally {
+      db.close()
+    }
+  } catch (e) {
+    console.warn('[kiroAuthSync] node:sqlite unavailable for CLI sync:', e)
+  }
+
+  if (!wrote) {
+    const { execFileSync } = await import('child_process')
+    const sqlite3Bin = process.platform === 'win32' ? 'sqlite3.exe' : 'sqlite3'
+    const esc = (s: string): string => s.replace(/'/g, "''")
+    const sql = [
+      'CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT);',
+      `INSERT OR REPLACE INTO auth_kv (key, value) VALUES ('${esc(preferredKey)}', '${esc(tokenJson)}');`,
+      ...staleKeys.map((k) => `DELETE FROM auth_kv WHERE key = '${esc(k)}';`)
+    ].join('\n')
+    execFileSync(sqlite3Bin, [dbPath], { input: sql, timeout: 10000, encoding: 'utf-8' })
+  }
+
+  console.log(`[kiroAuthSync] Synced social token to kiro-cli ${dbPath} (provider=${provider})`)
+  return { dbPath }
 }
 
 /**
