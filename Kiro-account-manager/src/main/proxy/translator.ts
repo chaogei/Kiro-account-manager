@@ -170,7 +170,7 @@ export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAICh
             id: item.call_id,
             type: 'function',
             function: {
-              name: item.name,
+              name: encodeResponseToolName(item.namespace, item.name),
               arguments: item.arguments
             }
           }]
@@ -196,15 +196,124 @@ export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAICh
   }
   if (request.temperature !== undefined) chatRequest.temperature = request.temperature
   if (request.top_p !== undefined) chatRequest.top_p = request.top_p
+  if (request.reasoning?.effort !== undefined) chatRequest.reasoning_effort = request.reasoning.effort
   if (request.max_output_tokens !== undefined) chatRequest.max_tokens = request.max_output_tokens
   if (request.stream !== undefined) chatRequest.stream = request.stream
-  if (request.tools !== undefined) chatRequest.tools = request.tools
+  if (request.tools !== undefined) chatRequest.tools = convertResponseTools(request.tools)
   const toolChoice = convertResponseToolChoice(request.tool_choice)
   if (toolChoice !== undefined) chatRequest.tool_choice = toolChoice
   if (request.previous_response_id !== undefined) chatRequest.conversation_id = request.previous_response_id
   if (request.metadata !== undefined) chatRequest.metadata = request.metadata
   if (request.kiro_context !== undefined) chatRequest.kiro_context = request.kiro_context
   return chatRequest
+}
+
+const RESPONSE_HOSTED_TOOL_TYPES = new Set([
+  'web_search',
+  'web_search_preview',
+  'file_search',
+  'computer_use_preview',
+  'code_interpreter',
+  'image_generation'
+])
+
+function convertResponseTools(tools: NonNullable<OpenAIResponsesRequest['tools']>): OpenAITool[] {
+  if (!Array.isArray(tools)) {
+    throw new Error('Responses tools must be an array')
+  }
+
+  return tools.flatMap(tool => {
+    const rawTool = tool as unknown as Record<string, unknown>
+    const toolType = rawTool.type
+
+    if (toolType === 'namespace') {
+      const namespace = rawTool.name
+      const nestedTools = rawTool.tools
+      if (typeof namespace !== 'string' || !Array.isArray(nestedTools)) {
+        throw new Error('Responses namespace tool requires name and tools')
+      }
+
+      return nestedTools.map(nestedToolValue => {
+        const nestedTool = nestedToolValue as Record<string, unknown>
+        if (nestedTool.type !== 'function' || typeof nestedTool.name !== 'string') {
+          throw new Error(`Unsupported tool in Responses namespace: ${String(nestedTool.type)}`)
+        }
+        return {
+          type: 'function' as const,
+          function: {
+            name: encodeResponseToolName(namespace, nestedTool.name),
+            description: typeof nestedTool.description === 'string'
+              ? nestedTool.description
+              : typeof rawTool.description === 'string'
+                ? rawTool.description
+                : `Tool: ${namespace}/${nestedTool.name}`,
+            parameters: nestedTool.parameters ?? { type: 'object', properties: {} }
+          }
+        }
+      })
+    }
+
+    // Hosted OpenAI tools execute inside OpenAI's platform and cannot be
+    // translated to Kiro's client-executed function tool protocol.
+    if (typeof toolType === 'string' && RESPONSE_HOSTED_TOOL_TYPES.has(toolType)) {
+      return []
+    }
+    if (toolType !== 'function') {
+      throw new Error(`Unsupported responses tool type: ${String(toolType)}`)
+    }
+
+    const nestedFunction = rawTool.function as Record<string, unknown> | undefined
+    if (nestedFunction) {
+      if (typeof nestedFunction.name !== 'string') {
+        throw new Error('Responses function tool requires name')
+      }
+      return [{
+        type: 'function' as const,
+        function: {
+          name: nestedFunction.name,
+          description: typeof nestedFunction.description === 'string'
+            ? nestedFunction.description
+            : `Tool: ${nestedFunction.name}`,
+          parameters: nestedFunction.parameters ?? { type: 'object', properties: {} }
+        }
+      }]
+    }
+
+    if (typeof rawTool.name !== 'string') {
+      throw new Error('Responses function tool requires name')
+    }
+    return [{
+      type: 'function' as const,
+      function: {
+        name: rawTool.name,
+        description: typeof rawTool.description === 'string' ? rawTool.description : `Tool: ${rawTool.name}`,
+        parameters: rawTool.parameters ?? { type: 'object', properties: {} }
+      }
+    }]
+  })
+}
+
+const RESPONSE_NAMESPACE_PREFIX = '__kiro_ns_'
+
+function encodeResponseToolName(namespace: string | undefined, name: string): string {
+  return namespace ? `${RESPONSE_NAMESPACE_PREFIX}${namespace.length}__${namespace}${name}` : name
+}
+
+function decodeResponseToolName(encodedName: string): { name: string; namespace?: string } {
+  if (!encodedName.startsWith(RESPONSE_NAMESPACE_PREFIX)) return { name: encodedName }
+  const lengthEnd = encodedName.indexOf('__', RESPONSE_NAMESPACE_PREFIX.length)
+  if (lengthEnd < 0) return { name: encodedName }
+
+  const namespaceLength = Number(encodedName.slice(RESPONSE_NAMESPACE_PREFIX.length, lengthEnd))
+  if (!Number.isInteger(namespaceLength) || namespaceLength < 1) return { name: encodedName }
+
+  const namespaceStart = lengthEnd + 2
+  const nameStart = namespaceStart + namespaceLength
+  if (nameStart >= encodedName.length) return { name: encodedName }
+  return {
+    namespace: encodedName.slice(namespaceStart, nameStart),
+    name: encodedName.slice(nameStart)
+  }
 }
 
 function convertResponseInputContent(content: string | OpenAIResponseContentPart[] | undefined): OpenAIMessage['content'] {
@@ -247,10 +356,62 @@ function convertResponseToolChoice(toolChoice: OpenAIResponsesRequest['tool_choi
   if (!toolChoice || typeof toolChoice === 'string') return toolChoice
   if (toolChoice.type === 'none' || toolChoice.type === 'auto') return toolChoice.type
   if (toolChoice.type === 'function' && toolChoice.name) {
-    return { type: 'function', function: { name: toolChoice.name } }
+    return { type: 'function', function: { name: encodeResponseToolName(toolChoice.namespace, toolChoice.name) } }
   }
   if (toolChoice.function?.name) return { type: 'function', function: { name: toolChoice.function.name } }
   throw new Error('Unsupported responses tool_choice')
+}
+
+interface ResponsesConversationState {
+  messages: OpenAIMessage[]
+  tools?: OpenAITool[]
+}
+
+const RESPONSES_CONVERSATION_CACHE_MAX = 100
+const responsesConversationCache = new Map<string, ResponsesConversationState>()
+
+export function restorePreviousResponse(
+  chatRequest: OpenAIChatRequest,
+  previousResponseId?: string
+): OpenAIChatRequest {
+  if (!previousResponseId) return chatRequest
+  const previous = responsesConversationCache.get(previousResponseId)
+  if (!previous) return chatRequest
+
+  // Refresh LRU order while rebuilding the full tool transcript required by
+  // Kiro's stateless runtime endpoint.
+  responsesConversationCache.delete(previousResponseId)
+  responsesConversationCache.set(previousResponseId, previous)
+  return {
+    ...chatRequest,
+    messages: [...previous.messages, ...chatRequest.messages],
+    tools: chatRequest.tools ?? previous.tools
+  }
+}
+
+export function rememberResponseConversation(
+  responseId: string,
+  processedRequest: OpenAIChatRequest,
+  chatResponse: OpenAIChatResponse
+): void {
+  const assistantMessages: OpenAIMessage[] = chatResponse.choices.map(choice => ({
+    role: 'assistant',
+    content: choice.message.content ?? '',
+    ...(choice.message.reasoning_content !== undefined
+      ? { reasoning_content: choice.message.reasoning_content }
+      : {}),
+    ...(choice.message.tool_calls !== undefined ? { tool_calls: choice.message.tool_calls } : {})
+  }))
+
+  responsesConversationCache.set(responseId, {
+    messages: [...processedRequest.messages, ...assistantMessages],
+    tools: processedRequest.tools
+  })
+  while (responsesConversationCache.size > RESPONSES_CONVERSATION_CACHE_MAX) {
+    const oldestResponseId = responsesConversationCache.keys().next().value
+    if (oldestResponseId === undefined) break
+    responsesConversationCache.delete(oldestResponseId)
+  }
 }
 
 export function openAIChatToResponsesResponse(
@@ -259,13 +420,17 @@ export function openAIChatToResponsesResponse(
 ): OpenAIResponsesResponse {
   const output: OpenAIResponseOutputItem[] = response.choices.flatMap<OpenAIResponseOutputItem>(choice => {
     if (choice.message.tool_calls?.length) {
-      return choice.message.tool_calls.map(toolCall => ({
-        type: 'function_call' as const,
-        id: `fc_${uuidv4()}`,
-        call_id: toolCall.id,
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments
-      }))
+      return choice.message.tool_calls.map(toolCall => {
+        const decodedName = decodeResponseToolName(toolCall.function.name)
+        return {
+          type: 'function_call' as const,
+          id: `fc_${uuidv4()}`,
+          call_id: toolCall.id,
+          name: decodedName.name,
+          ...(decodedName.namespace ? { namespace: decodedName.namespace } : {}),
+          arguments: toolCall.function.arguments
+        }
+      })
     }
     return [{
       type: 'message' as const,
@@ -293,6 +458,7 @@ export function openAIChatToResponsesResponse(
     id: `resp_${uuidv4()}`,
     object: 'response',
     created_at: response.created,
+    status: 'completed',
     model: response.model,
     output,
     usage
@@ -517,8 +683,14 @@ export function openaiToKiro(
   const kiroTools = convertOpenAITools(request.tools, toolNameRegistry)
 
   // OpenAI 兼容请求的 thinking/reasoning_effort 映射到 Kiro additionalModelRequestFields
+  // Codex may call /v1/responses before /v1/models has populated the schema
+  // cache. Current GPT 5.6 models use Kiro's reasoning.effort schema rather
+  // than Anthropic's thinking object, so retain a safe family fallback.
+  const effectiveThinkingConfig = thinkingConfig ?? (/^gpt-5\.6-/i.test(modelId)
+    ? { schemaPath: 'reasoning' as const, efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] }
+    : undefined)
   const additionalModelRequestFields = buildThinkingFields(
-    thinkingConfig,
+    effectiveThinkingConfig,
     request.thinking as { type: string; budget_tokens?: number },
     request.reasoning_effort
   )
