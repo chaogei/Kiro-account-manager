@@ -1436,7 +1436,8 @@ export class ProxyServer {
             currentAccount = this.accountPool.getAccount(currentAccount.id) || currentAccount
             continue
           }
-          // 刷新失败 → 切到没试过的下个账号
+          // 刷新失败 → 标记 RECOVERABLE 错误触发断路器冷却，然后切到没试过的下个账号
+          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, 401)
           const nextAccount = switchToNextAccount()
           if (nextAccount && !triedIds.has(nextAccount.id)) {
             currentAccount = nextAccount
@@ -2874,12 +2875,23 @@ export class ProxyServer {
           res.end()
           resolve()
         },
-        (error) => {
+        async (error) => {
           if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
             resolve()
             return
           }
           console.error('[ProxyServer] Stream error:', error)
+
+          // P1-19 流式错误恢复：尝试切换账号重试一次
+          const failoverAccount = await this.tryStreamFailover(account.id, error, signal)
+          if (failoverAccount) {
+            console.log(`[ProxyServer] Stream failover retry with ${failoverAccount.email || failoverAccount.id.slice(0, 8)}`)
+            // headers 已发送，传入 headersSent=true 避免重复 writeHead
+            await this.handleOpenAIStream(res, failoverAccount, kiroPayload, model, startTime, currentRound, id, true, matchedApiKey, toolNameRegistry, signal)
+            resolve()
+            return
+          }
+
           res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`)
           res.end()
 
@@ -3292,12 +3304,23 @@ export class ProxyServer {
           res.end()
           resolve()
         },
-        (error) => {
+        async (error) => {
           if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
             resolve()
             return
           }
           console.error('[ProxyServer] Stream error:', error)
+
+          // P1-19 流式错误恢复：尝试切换账号重试一次
+          const failoverAccount = await this.tryStreamFailover(account.id, error, signal)
+          if (failoverAccount) {
+            console.log(`[ProxyServer] Stream failover retry with ${failoverAccount.email || failoverAccount.id.slice(0, 8)}`)
+            // headers 已发送，传入 headersSent=true 避免重复 writeHead
+            await this.handleClaudeStream(res, failoverAccount, kiroPayload, model, startTime, currentRound, id, true, currentBlockIndex, matchedApiKey, toolNameRegistry, signal, simulatedCacheUsage)
+            resolve()
+            return
+          }
+
           const errorEvent = createClaudeStreamEvent('error', {
             error: { type: 'api_error', message: error.message }
           })
@@ -3325,6 +3348,105 @@ export class ProxyServer {
         resolve()
       })
     })
+  }
+
+  /**
+   * 流式请求错误时尝试切换账号重试一次（P1-19）
+   *
+   * 流式请求不走 callWithRetry，之前遇到 402/429/5xx 会直接返回客户端错误不切号。
+   * 现在在给客户端写出 error 之前，检测错误是否可恢复：
+   * - 402/429 → 记录配额耗尽，切端点 + 切账号重试一次
+   * - 5xx → 切账号重试一次
+   * - 401/403 → 刷新 token，失败后切账号重试一次
+   * - FATAL (400/422) / suspended → 不重试，直接返回错误
+   *
+   * 返回 true 表示已发起重试（调用方不应再写 error），false 表示应正常返回错误。
+   */
+  private async tryStreamFailover(
+    accountId: string,
+    error: Error,
+    signal?: AbortSignal
+  ): Promise<ProxyAccount | null> {
+    const errMsg = error.message || ''
+    const errCode = errMsg.match(/(\d{3})/)?.[1]
+    const parsedCode = errCode ? parseInt(errCode) : 0
+
+    // 检测封禁错误：不重试，直接让上层返回错误
+    if (this.detectSuspendedError(errMsg)) {
+      const account = this.accountPool.getAccount(accountId)
+      if (account) {
+        const suspendInfo = this.detectSuspendedError(errMsg)!
+        const newlyMarked = this.accountPool.markSuspended(accountId, suspendInfo.reason, suspendInfo.message)
+        if (newlyMarked) {
+          this.events.onAccountSuspended?.({
+            accountId,
+            email: account.email,
+            reason: suspendInfo.reason,
+            message: suspendInfo.message
+          })
+          this.appendAuditLog('account_suspended', { accountId, email: account.email, reason: suspendInfo.reason })
+          this.triggerWebhook('proxy-account-suspended', {
+            title: '反代账号被风控',
+            message: `账号 ${account.email || accountId.slice(0, 8)} 被 Kiro 后端标记为 ${suspendInfo.reason}，需要人工解封`,
+            level: 'error',
+            fields: {
+              邮箱: account.email || '-',
+              账号ID: accountId.slice(0, 8),
+              封禁原因: suspendInfo.reason,
+              详情: this.sanitizeErrorMessage(suspendInfo.message || '').slice(0, 200)
+            }
+          })
+        }
+      }
+      return null
+    }
+
+    // FATAL 类错误不重试（请求本身有问题）
+    const errorType = classifyError(parsedCode || 500, undefined)
+    if (errorType === ErrorType.FATAL && parsedCode !== 500 && parsedCode !== 502 && parsedCode !== 503 && parsedCode !== 504) {
+      return null
+    }
+
+    // 401/403：尝试刷新 token
+    if (errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('Auth')) {
+      const account = this.accountPool.getAccount(accountId)
+      if (account) {
+        console.log(`[ProxyServer] Stream auth error on ${account.email || accountId}, attempting token refresh`)
+        const refreshed = await this.refreshToken(account, signal)
+        if (refreshed) {
+          return this.accountPool.getAccount(accountId)
+        }
+        this.accountPool.recordError(accountId, ErrorType.RECOVERABLE, 401)
+      }
+    }
+
+    // 402/429：配额耗尽
+    if (parsedCode === 402 || parsedCode === 429 || errMsg.includes('quota') || errMsg.includes('ThrottlingException') || errMsg.includes('reached the limit') || errMsg.includes('ServiceQuotaExceededException') || errMsg.includes('limit exceeded') || errMsg.includes('rate limit')) {
+      this.accountPool.recordError(accountId, ErrorType.RECOVERABLE, parsedCode || 429)
+    }
+
+    // 5xx：服务端瞬时错误
+    if (parsedCode >= 500 || errMsg.includes('500') || errMsg.includes('502') || errMsg.includes('503') || errMsg.includes('504')) {
+      this.accountPool.recordError(accountId, ErrorType.RECOVERABLE, parsedCode || 503)
+      // 等待短暂退避后重试
+      await this.waitForRetry(this.config.retryDelayMs || 1000, signal)
+    }
+
+    // 切换到下一个可用账号
+    const excludeSet = new Set<string>([accountId])
+    const nextAccount = this.config.enableMultiAccount
+      ? this.accountPool.getNextAccount(excludeSet)
+      : this.config.autoSwitchOnQuotaExhausted
+        ? this.accountPool.getNextAvailableAccount(excludeSet)
+        : null
+
+    if (nextAccount) {
+      console.log(`[ProxyServer] Stream failover: ${accountId.slice(0, 8)} → ${nextAccount.email || nextAccount.id.slice(0, 8)} (error: ${parsedCode || errMsg.slice(0, 40)})`)
+      return nextAccount
+    }
+
+    console.log(`[ProxyServer] Stream failover: no alternative account available for ${accountId.slice(0, 8)}`)
+    return null
   }
 
   // 处理 API 错误
