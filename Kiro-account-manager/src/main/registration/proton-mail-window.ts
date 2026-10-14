@@ -158,12 +158,71 @@ export async function openProtonLogin(
   }
 }
 
+/**
+ * 尝试从 Proton 页面 DOM 读取当前登录的邮箱地址。
+ * 多选择器兜底：settings 页 account 区域 > 页面内可见邮箱 > 未找到返回 undefined。
+ */
+async function readLoggedInEmail(w: BrowserWindow): Promise<string | undefined> {
+  try {
+    const email = await w.webContents.executeJavaScript(
+      `(() => {
+        // 1. 设置页 account 区域的邮箱显示
+        const accountSels = [
+          '[data-testid="account-address"]',
+          '[class*="accountEmail"]',
+          '[class*="account-email"]',
+          '.settings-account-address',
+        ];
+        for (const s of accountSels) {
+          const el = document.querySelector(s);
+          if (el) {
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t.includes('@')) return t.split(/\\s+/).find(w => w.includes('@')) || '';
+          }
+        }
+        // 2. 页面中可见的邮箱地址文本（用户头像旁 / 用户名下拉等）
+        const userArea = document.querySelector(
+          '[class*="user-menu"], [class*="UserMenu"], [data-testid="sidebar-account"]'
+        );
+        if (userArea) {
+          const text = (userArea as HTMLElement).innerText || '';
+          const m = text.match(/[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}/i);
+          if (m) return m[0];
+        }
+        return '';
+      })()`,
+      false
+    )
+    return email || undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 查询当前 Proton 登录态（不弹窗：窗口不存在则后台静默创建检测） */
-export async function getProtonLoginStatus(proxy?: string): Promise<{ loggedIn: boolean }> {
+export async function getProtonLoginStatus(
+  proxy?: string,
+  expectedEmail?: string
+): Promise<{ loggedIn: boolean; currentEmail?: string; emailMatch?: boolean }> {
   try {
     const w = await ensureWindow(false, proxy)
     await sleep(600)
-    return { loggedIn: await checkLoggedIn(w) }
+    const loggedIn = await checkLoggedIn(w)
+    if (!loggedIn) return { loggedIn: false }
+
+    const currentEmail = await readLoggedInEmail(w)
+
+    // 如果传了 expectedEmail，做母邮箱一致性比较（两边都去点 + 小写）
+    let emailMatch: boolean | undefined
+    if (expectedEmail && currentEmail) {
+      const normalize = (e: string) => {
+        const [local, ...domainParts] = e.toLowerCase().split('@')
+        return `${local.replace(/\\./g, '')}@${domainParts.join('@')}`
+      }
+      emailMatch = normalize(currentEmail) === normalize(expectedEmail)
+    }
+
+    return { loggedIn: true, currentEmail, emailMatch }
   } catch {
     return { loggedIn: false }
   }
@@ -196,7 +255,10 @@ interface ScanResult {
  * @param address 当前注册使用的收件地址（点号变体，原样含点）
  */
 function buildScanScript(address: string): string {
-  const addrFull = JSON.stringify(address.trim().toLowerCase())
+  // 点号归一化：Proton 邮箱忽略 local-part 中的点号，DOM 读到的收件人是去点的
+  // e.g. "Mi.meKasu.ga05@proton.me" → "mikasuga05@proton.me"
+  const [local, domain] = address.trim().toLowerCase().split('@')
+  const addrFull = JSON.stringify(local.replace(/\./g, '') + '@' + domain)
   return `(async () => {
     const addrFull = ${addrFull};
     const extractCode = (t) => { const m = (t||'').match(/\\b\\d{6}\\b/g); return m ? m[m.length-1] : ''; };
@@ -338,6 +400,23 @@ async function runWaitProtonOtp(address: string, opts: WaitProtonOtpOptions): Pr
 
   if (!(await checkLoggedIn(w))) {
     throw new Error('Proton 未登录，请先在「登录 Proton」窗口完成登录')
+  }
+
+  // 邮箱一致性检查：如果当前登录的 Proton 账户与注册邮箱不匹配，提前中止
+  // 避免在错误的收件箱里轮询 2 分钟才发现收不到码
+  {
+    const currentEmail = await readLoggedInEmail(w)
+    if (currentEmail) {
+      const normalize = (e: string) => {
+        const [local, ...domainParts] = e.toLowerCase().split('@')
+        return `${local.replace(/\\./g, '')}@${domainParts.join('@')}`
+      }
+      if (normalize(currentEmail) !== normalize(address)) {
+        throw new Error(
+          `Proton 登录账户 (${currentEmail}) 与注册邮箱 (${address}) 不匹配，请退出 Proton 重新登录正确的账户`
+        )
+      }
+    }
   }
 
   // 取码前导航到 inbox 确保处于最新收件箱视图

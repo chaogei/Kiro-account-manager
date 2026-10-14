@@ -136,8 +136,8 @@ export function registerIPCHandlers(getMainWindow: () => BrowserWindow | null): 
   })
 
   // 查询 Proton 登录态（不弹窗）
-  ipcMain.handle('proton-login-status', async (_event, proxy?: string) => {
-    return getProtonLoginStatus(proxy)
+  ipcMain.handle('proton-login-status', async (_event, proxy?: string, expectedEmail?: string) => {
+    return getProtonLoginStatus(proxy, expectedEmail)
   })
 
   // 关闭 Proton 窗口（保留登录态）
