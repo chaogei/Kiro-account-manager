@@ -30,7 +30,9 @@ import {
   createOpenaiStreamChunk,
   createClaudeStreamEvent,
   responsesToOpenAIChat,
-  openAIChatToResponsesResponse
+  openAIChatToResponsesResponse,
+  restorePreviousResponse,
+  rememberResponseConversation
 } from './translator'
 import { ToolNameRegistry } from './toolNameRegistry'
 import { promptCacheTracker } from './promptCacheTracker'
@@ -194,7 +196,8 @@ function buildClientModel(input: {
   const outputModalities: ModelModality[] = ['text']
   const output = modelOutputLimit(input.id, input.maxOutputTokens)
   const context = typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? input.maxInputTokens : 200000
-  const hasThinking = !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config
+  const modelRequestProperties = input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined
+  const hasThinking = !!modelRequestProperties?.thinking || !!modelRequestProperties?.output_config || !!modelRequestProperties?.reasoning
   const reasoning = hasThinking
   const interleaved = hasThinking ? { field: 'reasoning_content' as const } : false
 
@@ -236,7 +239,7 @@ function buildClientModel(input: {
     inputTypes: input.supportedInputTypes,
     rateMultiplier: input.rateMultiplier,
     rateUnit: input.rateUnit,
-    supportsThinking: !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config,
+    supportsThinking: hasThinking,
     thinkingEfforts: extractThinkingSchema(input.additionalModelRequestFieldsSchema)?.efforts,
     thinkingSchemaPath: extractThinkingSchema(input.additionalModelRequestFieldsSchema)?.schemaPath,
     supportsPromptCaching: input.promptCaching?.supportsPromptCaching || false,
@@ -1060,7 +1063,7 @@ export class ProxyServer {
       maxOutputTokens: m.tokenLimits?.maxOutputTokens,
       rateMultiplier: m.rateMultiplier,
       rateUnit: m.rateUnit,
-      supportsThinking: !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config,
+      supportsThinking: !!extractThinkingSchema(m.additionalModelRequestFieldsSchema),
       thinkingEfforts: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.efforts,
       thinkingSchemaPath: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.schemaPath,
       supportsPromptCaching: m.promptCaching?.supportsPromptCaching || false,
@@ -1103,18 +1106,7 @@ export class ProxyServer {
       }
     }
 
-    // 合并隐藏模型（与 /v1/models 端点一致）
-    const modelIds = new Set(kiroModels.map(m => m.modelId))
-    const hiddenModels: KiroModel[] = [
-      { modelId: 'claude-3.7-sonnet', modelName: 'Claude 3.7 Sonnet', description: 'Claude 3.7 Sonnet (hidden)', supportedInputTypes: ['TEXT', 'IMAGE'], tokenLimits: { maxInputTokens: 200000, maxOutputTokens: 64000 } } as KiroModel,
-      { modelId: 'simple-task', modelName: 'Simple Task', description: 'Kiro fast model (routes to Haiku)', supportedInputTypes: ['TEXT'], tokenLimits: { maxInputTokens: 200000, maxOutputTokens: 4096 } } as KiroModel,
-      { modelId: 'CLAUDE_SONNET_4_20250514_V1_0', modelName: 'Claude Sonnet 4 (CW)', description: 'CodeWhisperer internal ID', supportedInputTypes: ['TEXT', 'IMAGE'], tokenLimits: { maxInputTokens: 200000, maxOutputTokens: 64000 } } as KiroModel,
-      { modelId: 'CLAUDE_HAIKU_4_5_20251001_V1_0', modelName: 'Claude Haiku 4.5 (CW)', description: 'CodeWhisperer internal ID', supportedInputTypes: ['TEXT', 'IMAGE'], tokenLimits: { maxInputTokens: 200000, maxOutputTokens: 64000 } } as KiroModel,
-      { modelId: 'CLAUDE_3_7_SONNET_20250219_V1_0', modelName: 'Claude 3.7 Sonnet (CW)', description: 'CodeWhisperer internal ID', supportedInputTypes: ['TEXT', 'IMAGE'], tokenLimits: { maxInputTokens: 200000, maxOutputTokens: 64000 } } as KiroModel
-    ]
-    const merged = [...kiroModels, ...hiddenModels.filter(m => !modelIds.has(m.modelId))]
-
-    return { models: merged.map(ProxyServer.mapKiroModelToApi), fromCache }
+    return { models: kiroModels.map(ProxyServer.mapKiroModelToApi), fromCache }
   }
 
   // 检查 Token 是否需要刷新
@@ -2373,32 +2365,6 @@ export class ProxyServer {
   private async handleModels(res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
     const now = Date.now()
     
-    // Kiro 官方模型（与 UI 保持一致）
-    const kiroOfficialModels = [
-      buildClientModel({ id: 'auto', created: now, ownedBy: 'kiro-api', description: 'Auto select best model' }),
-      buildClientModel({ id: 'claude-sonnet-4.5', created: now, ownedBy: 'kiro-api', description: 'The latest Claude Sonnet model' }),
-      buildClientModel({ id: 'claude-sonnet-4', created: now, ownedBy: 'kiro-api', description: 'Hybrid reasoning and coding' }),
-      buildClientModel({ id: 'claude-haiku-4.5', created: now, ownedBy: 'kiro-api', description: 'The latest Claude Haiku model' }),
-      buildClientModel({ id: 'claude-opus-4.5', created: now, ownedBy: 'kiro-api', description: 'The most powerful model' })
-    ]
-
-    // 隐藏模型（未在官方 ListAvailableModels 中返回，但后端可能支持）
-    const hiddenModels = [
-      buildClientModel({ id: 'claude-3.7-sonnet', created: now, ownedBy: 'kiro-api', description: 'Claude 3.7 Sonnet (hidden)', modelName: 'Claude 3.7 Sonnet', supportedInputTypes: ['TEXT', 'IMAGE'], maxInputTokens: 200000, maxOutputTokens: 64000 }),
-      buildClientModel({ id: 'simple-task', created: now, ownedBy: 'kiro-api', description: 'Kiro fast model for intent classification and lightweight tasks (routes to Haiku)', modelName: 'Simple Task', supportedInputTypes: ['TEXT'], maxInputTokens: 200000, maxOutputTokens: 4096 }),
-      buildClientModel({ id: 'CLAUDE_SONNET_4_20250514_V1_0', created: now, ownedBy: 'kiro-api', description: 'Claude Sonnet 4 (CodeWhisperer internal ID)', modelName: 'Claude Sonnet 4 (CW)', supportedInputTypes: ['TEXT', 'IMAGE'], maxInputTokens: 200000, maxOutputTokens: 64000 }),
-      buildClientModel({ id: 'CLAUDE_HAIKU_4_5_20251001_V1_0', created: now, ownedBy: 'kiro-api', description: 'Claude Haiku 4.5 (CodeWhisperer internal ID)', modelName: 'Claude Haiku 4.5 (CW)', supportedInputTypes: ['TEXT', 'IMAGE'], maxInputTokens: 200000, maxOutputTokens: 64000 }),
-      buildClientModel({ id: 'CLAUDE_3_7_SONNET_20250219_V1_0', created: now, ownedBy: 'kiro-api', description: 'Claude 3.7 Sonnet (CodeWhisperer internal ID)', modelName: 'Claude 3.7 Sonnet (CW)', supportedInputTypes: ['TEXT', 'IMAGE'], maxInputTokens: 200000, maxOutputTokens: 64000 })
-    ]
-
-    // 预设模型（GPT 兼容别名）
-    const presetModels = [
-      buildClientModel({ id: 'gpt-4o', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-4', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-4-turbo', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-3.5-turbo', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' })
-    ]
-
     // 尝试从 Kiro API 获取动态模型
     let kiroModels: KiroModel[] = []
     
@@ -2445,39 +2411,9 @@ export class ProxyServer {
       modelProvider: m.modelProvider
     }))
 
-    // 合并模型列表，去重
-    const modelIds = new Set<string>()
-    const allModels: ClientModel[] = []
-    
-    // 1. 优先添加动态模型（从 API 获取的，包含真实 token limit / input types）
-    for (const m of dynamicModels) {
-      if (!modelIds.has(m.id)) {
-        modelIds.add(m.id)
-        allModels.push(m)
-      }
-    }
-    
-    // 2. 添加隐藏模型（未在官方 ListAvailableModels 中返回，但后端可能支持）
-    for (const m of hiddenModels) {
-      if (!modelIds.has(m.id)) {
-        modelIds.add(m.id)
-        allModels.push(m)
-      }
-    }
-    
-    // 3. 动态模型缺失时才添加静态兜底
-    if (dynamicModels.length === 0) {
-      for (const m of [...kiroOfficialModels, ...presetModels]) {
-        if (!modelIds.has(m.id)) {
-          modelIds.add(m.id)
-          allModels.push(m)
-        }
-      }
-    }
-
     this.throwIfResponseClosed(res, signal)
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ object: 'list', data: allModels }))
+    res.end(JSON.stringify({ object: 'list', data: dynamicModels }))
   }
 
   // 处理 OpenAI Chat Completions 请求
@@ -2619,6 +2555,7 @@ export class ProxyServer {
     try {
       responseRequest = JSON.parse(body)
       chatRequest = responsesToOpenAIChat(responseRequest)
+      chatRequest = restorePreviousResponse(chatRequest, responseRequest.previous_response_id)
       // session hint：用于会话粘性
       const rawHintResp = ProxyServer.extractSessionHint(req, responseRequest)
       if (rawHintResp) {
@@ -2677,6 +2614,7 @@ export class ProxyServer {
         this.throwIfResponseClosed(res, signal)
         const response = openAIChatToResponsesResponse(chatResponse, responseRequest.previous_response_id)
         const streamedResponse = { ...response, id: responseId }
+        rememberResponseConversation(responseId, processedRequest, chatResponse)
         streamedResponse.output.forEach((item, outputIndex) => {
           this.throwIfResponseClosed(res, signal)
           res.write(`event: response.output_item.added\ndata: ${JSON.stringify({ type: 'response.output_item.added', output_index: outputIndex, item })}\n\n`)
@@ -2728,6 +2666,7 @@ export class ProxyServer {
       const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
       this.throwIfResponseClosed(res, signal)
       const response = openAIChatToResponsesResponse(chatResponse, responseRequest.previous_response_id)
+      rememberResponseConversation(response.id, processedRequest, chatResponse)
 
       this.recordRequestSuccess()
       this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens

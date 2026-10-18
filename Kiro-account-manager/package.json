@@ -20,6 +20,7 @@
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
+    "test:unit": "node --test test/responses-translator.test.mjs",
     "test:e2e": "node test/e2e-fullsuite/run.mjs",
     "test:e2e:only": "node test/e2e-fullsuite/run.mjs --only"
   },

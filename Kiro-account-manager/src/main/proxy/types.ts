@@ -112,13 +112,39 @@ export interface OpenAIResponsesRequest {
   top_p?: number
   max_output_tokens?: number
   stream?: boolean
-  tools?: OpenAITool[]
-  tool_choice?: string | { type: string; name?: string; function?: { name: string } }
+  tools?: OpenAIResponsesTool[]
+  tool_choice?: string | { type: string; name?: string; namespace?: string; function?: { name: string } }
   previous_response_id?: string
-  reasoning?: unknown
+  reasoning?: { effort?: string; [key: string]: unknown }
   metadata?: Record<string, unknown>
   kiro_context?: KiroRequestContext
 }
+
+export type OpenAIResponsesTool =
+  | OpenAITool
+  | {
+      type: 'function'
+      name: string
+      description?: string
+      parameters?: unknown
+      strict?: boolean
+    }
+  | {
+      type: 'namespace'
+      name: string
+      description?: string
+      tools: Array<{
+        type: 'function'
+        name: string
+        description?: string
+        parameters?: unknown
+        strict?: boolean
+      }>
+    }
+  | {
+      type: 'web_search' | 'web_search_preview' | 'file_search' | 'computer_use_preview' | 'code_interpreter' | 'image_generation'
+      [key: string]: unknown
+    }
 
 export interface OpenAIResponseInputItem {
   type?: 'message' | 'function_call' | 'function_call_output'
@@ -126,6 +152,7 @@ export interface OpenAIResponseInputItem {
   content?: string | OpenAIResponseContentPart[]
   call_id?: string
   name?: string
+  namespace?: string
   arguments?: string
   output?: string
 }
@@ -142,6 +169,7 @@ export interface OpenAIResponsesResponse {
   id: string
   object: 'response'
   created_at: number
+  status: 'completed'
   model: string
   output: OpenAIResponseOutputItem[]
   previous_response_id?: string
@@ -156,7 +184,7 @@ export interface OpenAIResponsesResponse {
 
 export type OpenAIResponseOutputItem =
   | { type: 'message'; id: string; role: 'assistant'; content: { type: 'output_text'; text: string }[] }
-  | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
+  | { type: 'function_call'; id: string; call_id: string; name: string; namespace?: string; arguments: string }
 
 // ============ Claude 兼容格式 ============
 export interface ClaudeRequest {

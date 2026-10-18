@@ -143,32 +143,23 @@ async function fetchWithProxy(url: string, options: RequestInit, account?: Proxy
   return await fetch(url, options)
 }
 
-// Kiro API 端点配置
-const KIRO_ENDPOINTS = [
-  {
-    url: 'https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse',
-    origin: 'AI_EDITOR',
-    amzTarget: 'AmazonCodeWhispererStreamingService.GenerateAssistantResponse',
-    name: 'CodeWhisperer',
-    protocol: 'generateAssistantResponse' as const
-  },
-  {
-    url: 'https://q.us-east-1.amazonaws.com/generateAssistantResponse',
-    origin: 'AI_EDITOR',
-    amzTarget: 'AmazonCodeWhispererStreamingService.GenerateAssistantResponse',
-    name: 'AmazonQ',
-    protocol: 'generateAssistantResponse' as const
-  },
-  {
-    url: 'https://q.us-east-1.amazonaws.com/SendMessageStreaming',
-    origin: 'CLI',
-    amzTarget: 'AmazonQDeveloperStreamingService.SendMessage',
-    name: 'AmazonQCLI'
+interface KiroEndpoint {
+  url: string
+  origin: string
+  name: 'KiroRuntime'
+}
+
+function getKiroRuntimeEndpoint(region?: string): KiroEndpoint {
+  const resolvedRegion = region?.trim() || 'us-east-1'
+  return {
+    url: `https://runtime.${resolvedRegion}.kiro.dev/`,
+    origin: 'KIRO_CLI',
+    name: 'KiroRuntime'
   }
-]
+}
 
 // Kiro 版本号（跟随官方 IDE 更新）
-const KIRO_VERSION = '0.12.155'
+const KIRO_VERSION = '0.12.333'
 const AWS_SDK_VERSION = '1.0.34'
 const AWS_STREAMING_API_VERSION = '1.0.34'
 
@@ -264,11 +255,6 @@ REMEMBER: When in doubt, write LESS per operation. Multiple small operations > o
 const THINKING_MODE_PROMPT = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
 
-const CODEWHISPERER_DEFAULT_MODEL_ID = 'CLAUDE_SONNET_4_20250514_V1_0'
-const CODEWHISPERER_MODEL_CACHE_TTL = 5 * 60 * 1000
-
-const codeWhispererModelCache = new Map<string, { models: KiroModel[]; timestamp: number }>()
-
 // 模型 ID 映射
 const MODEL_ID_MAP: Record<string, string> = {
   // Claude 4.5 系列
@@ -319,86 +305,30 @@ export function mapModelId(model: string): string {
   // 0) 归一化版本号短横 → 点号（claude-opus-4-6 → claude-opus-4.6），兼容不支持 "." 的客户端
   modelId = normalizeClaudeVersion(modelId)
   const lower = modelId.toLowerCase()
+  if (lower.startsWith('qdev::')) return modelId
   // 1) 显式 alias 映射优先
   if (MODEL_ID_MAP[lower]) return MODEL_ID_MAP[lower]
   // 2) 看似 Kiro 支持的 Claude 模型格式 (claude-{sonnet|haiku|opus}-{ver})，原样透传
   //    用于向前兼容尚未加入 MODEL_ID_MAP 的新发布模型
   if (/^claude-(sonnet|haiku|opus)-/.test(lower)) return modelId
-  // 3) 完全未知的 model（用户拼错/不存在），兜底到 default 避免直接 400
-  console.warn(`[Kiro API] Unknown model "${modelId}" → fallback to "${MODEL_ID_MAP.default}"`)
-  return MODEL_ID_MAP.default
+  // 3) Kiro 的模型目录由服务端驱动。新模型 ID 必须原样透传，不能静默
+  //    改写为已经过期的本地 Claude 兜底模型。
+  console.warn(`[Kiro API] Unknown local model "${modelId}" → forwarding verbatim`)
+  return modelId
 }
 
 function clonePayload(payload: KiroPayload): KiroPayload {
   return JSON.parse(JSON.stringify(payload)) as KiroPayload
 }
 
-function normalizeModelKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
-}
-
-function modelTokens(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-}
-
-function matchesRequestedModel(model: KiroModel, requestedModelId: string): boolean {
-  // 1. modelId 级精确匹配（去除符号后比较）
-  const requestedKey = normalizeModelKey(requestedModelId)
-  const modelIdKey = normalizeModelKey(model.modelId)
-  if (modelIdKey === requestedKey || modelIdKey.includes(requestedKey)) return true
-  // 2. modelName 精确匹配
-  if (model.modelName && normalizeModelKey(model.modelName).includes(requestedKey)) return true
-  // 3. token 匹配（所有请求 token 必须在 modelId+modelName 中命中，不搜索 description 避免误匹配）
-  const tokens = modelTokens(requestedModelId).filter(token => token !== 'latest' && token !== 'model')
-  if (tokens.length === 0) return false
-  const candidateTokens = new Set(modelTokens(`${model.modelId} ${model.modelName || ''}`))
-  // 必须全部 token 命中
-  if (!tokens.every(token => candidateTokens.has(token))) return false
-  // 防止模型家族冲突：如果请求包含 opus/sonnet/haiku，候选必须也包含对应的
-  const families = ['opus', 'sonnet', 'haiku']
-  for (const family of families) {
-    if (tokens.includes(family) && !candidateTokens.has(family)) return false
-    if (!tokens.includes(family) && candidateTokens.has(family)) return false
-  }
-  return true
-}
-
 function isCodeWhispererModelId(modelId: string): boolean {
   return /^[A-Z0-9_]+$/.test(modelId) && modelId.includes('_')
-}
-
-function getModelCacheKey(account: ProxyAccount): string {
-  return `${account.id}:${account.region || 'us-east-1'}:${resolveProfileArn(account) ?? 'no-arn'}`
-}
-
-async function getCachedCodeWhispererModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
-  const key = getModelCacheKey(account)
-  const cached = codeWhispererModelCache.get(key)
-  if (cached && Date.now() - cached.timestamp < CODEWHISPERER_MODEL_CACHE_TTL) return cached.models
-  const models = await fetchKiroModels(account, signal)
-  codeWhispererModelCache.set(key, { models, timestamp: Date.now() })
-  return models
-}
-
-async function resolveCodeWhispererModelId(account: ProxyAccount, requestedModelId?: string, signal?: AbortSignal): Promise<string> {
-  const modelId = requestedModelId?.trim()
-  if (!modelId) return CODEWHISPERER_DEFAULT_MODEL_ID
-  if (isCodeWhispererModelId(modelId)) return modelId
-  const models = await getCachedCodeWhispererModels(account, signal)
-  return models.find(model => matchesRequestedModel(model, modelId))?.modelId || CODEWHISPERER_DEFAULT_MODEL_ID
 }
 
 function getPayloadModelId(payload: KiroPayload): string | undefined {
   const currentModelId = payload.conversationState.currentMessage.userInputMessage.modelId
   if (currentModelId) return currentModelId
   return payload.conversationState.history?.find(message => message.userInputMessage?.modelId)?.userInputMessage?.modelId
-}
-
-function applyPayloadModelId(payload: KiroPayload, modelId: string): void {
-  payload.conversationState.currentMessage.userInputMessage.modelId = modelId
-  for (const message of payload.conversationState.history ?? []) {
-    if (message.userInputMessage) message.userInputMessage.modelId = modelId
-  }
 }
 
 function applyPayloadOrigin(payload: KiroPayload, origin: string): void {
@@ -1148,10 +1078,8 @@ function fingerprintFromHistory(history: KiroHistoryMessage[]): string | undefin
 // 清除所有内存缓存
 export function clearAllCaches(): { conversation: number; model: number } {
   const conversationCount = conversationCache.size
-  const modelCount = codeWhispererModelCache.size
   conversationCache.clear()
-  codeWhispererModelCache.clear()
-  return { conversation: conversationCount, model: modelCount }
+  return { conversation: conversationCount, model: 0 }
 }
 
 // machineId 稳定生成缓存（用于无绑定 machineId 且 K-Proxy 不可用时的兆底）
@@ -1178,7 +1106,7 @@ function getAccountMachineId(accountId: string, accountMachineId?: string): stri
 }
 
 // 获取认证方式对应的请求头
-function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
+function getAuthHeaders(account: ProxyAccount): Record<string, string> {
   const machineId = getAccountMachineId(account.id, account.machineId)
   // 按配置的 agent 模式（vibe 或 spec）设置 header
   const agentMode = configuredAgentMode
@@ -1201,25 +1129,14 @@ function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[
   return headers
 }
 
-// 获取排序后的端点列表（根据首选端点配置）
-function getSortedEndpoints(preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'): typeof KIRO_ENDPOINTS {
-  if (!preferredEndpoint) return KIRO_ENDPOINTS.filter(ep => ep.name !== 'AmazonQCLI')
-  
-  // AmazonQ CLI 模式：只用这一个端点，失败不回退
-  if (preferredEndpoint === 'amazonq-cli') {
-    return KIRO_ENDPOINTS.filter(ep => ep.name === 'AmazonQCLI')
-  }
-  
-  const preferredName = preferredEndpoint === 'codewhisperer' ? 'CodeWhisperer' : 'AmazonQ'
-  
-  const sorted = KIRO_ENDPOINTS.filter(ep => ep.name !== 'AmazonQCLI')
-  sorted.sort((a, b) => {
-    if (a.name === preferredName) return -1
-    if (b.name === preferredName) return 1
-    return 0
-  })
-  
-  return sorted
+// Current Kiro tokens are accepted by the Kiro runtime service. The legacy
+// CodeWhisperer/Amazon Q endpoints reject those tokens, so old preferences are
+// intentionally retained only as stored-config compatibility.
+function getSortedEndpoints(
+  _preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli',
+  region?: string
+): KiroEndpoint[] {
+  return [getKiroRuntimeEndpoint(region)]
 }
 
 function getAbortError(signal?: AbortSignal): Error {
@@ -1245,7 +1162,7 @@ export async function callKiroApiStream(
 ): Promise<void> {
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
   // 所有账号类型均走正常端点优先级（含 fallback），不再强制 Enterprise 走 CodeWhisperer
-  const endpoints = getSortedEndpoints(preferredEndpoint)
+  const endpoints = getSortedEndpoints(preferredEndpoint, account.region)
 
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底，流式端点自动不传占位符）
   if (!account.profileArn && isEnterprise) {
@@ -1269,20 +1186,10 @@ export async function callKiroApiStream(
         requestPayload.profileArn = resolvedArn
       }
       const requestedModelId = getPayloadModelId(requestPayload)
-      if (endpoint.name === 'CodeWhisperer') {
-        applyPayloadModelId(requestPayload, await resolveCodeWhispererModelId(account, requestedModelId, signal))
-      }
-
       applyPayloadOrigin(requestPayload, endpoint.origin)
 
-      // AmazonQCLI 端点不支持 agentContinuationId/agentTaskType
-      if (endpoint.name === 'AmazonQCLI') {
-        delete (requestPayload.conversationState as unknown as Record<string, unknown>).agentContinuationId
-        delete (requestPayload.conversationState as unknown as Record<string, unknown>).agentTaskType
-      }
-
       const payloadStr = JSON.stringify(requestPayload)
-      const headers = getAuthHeaders(account, endpoint)
+      const headers = getAuthHeaders(account)
       const currentUserInput = requestPayload.conversationState.currentMessage.userInputMessage
       const historyMessages = requestPayload.conversationState.history ?? []
       const historyToolUseCount = historyMessages.reduce((count, message) => count + (message.assistantResponseMessage?.toolUses?.length ?? 0), 0)
@@ -1365,12 +1272,9 @@ export async function callKiroApiStream(
           } else {
             delete retryPayload.profileArn
           }
-          if (endpoint.name === 'CodeWhisperer') {
-            applyPayloadModelId(retryPayload, await resolveCodeWhispererModelId(account, getPayloadModelId(retryPayload), signal))
-          }
           applyPayloadOrigin(retryPayload, endpoint.origin)
           const retryStr = JSON.stringify(retryPayload)
-          const retryHeaders = getAuthHeaders(account, endpoint)
+          const retryHeaders = getAuthHeaders(account)
           const retryAgent = getNetworkAgent(account)
           const retryResponse = retryAgent
             ? await undiciFetch(endpoint.url, { method: 'POST', headers: retryHeaders, body: retryStr, signal, dispatcher: retryAgent } as UndiciRequestInit) as unknown as Response
@@ -2308,7 +2212,8 @@ export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<
 
 // 获取 Kiro 官方模型列表（支持分页，与官方插件一致传递 profileArn）
 export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
-  const baseUrl = getQServiceEndpoint(account.region)
+  const region = account.region?.trim() || 'us-east-1'
+  const baseUrl = `https://management.${region}.kiro.dev`
   const machineId = getAccountMachineId(account.id, account.machineId)
   
   const headers: Record<string, string> = {
