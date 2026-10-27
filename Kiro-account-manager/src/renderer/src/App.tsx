@@ -7,6 +7,7 @@ import { useWebhookStore } from './store/webhooks'
 import { UpdateDialog } from './components/UpdateDialog'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { useAccountsStore, isBannedAccountError } from './store/accounts'
+import { applyAccountCredentialUpdate } from '../../shared/accountCredentials'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
 const TRAY_UPDATE_DEBOUNCE_MS = 400
@@ -300,17 +301,14 @@ function App(): React.JSX.Element {
     }
   }, [updateAccountStatus])
 
-  // 监听反代账号更新事件（Enterprise profileArn 自愈），持久化到 store + 磁盘
+  // 全局接收续期与 profileArn 更新，不能依赖用户是否打开了反代页面。
   useEffect(() => {
     const unsubscribe = window.api.onProxyAccountUpdate((info) => {
-      if (!info.profileArn) return
+      if (!info.accessToken && !info.profileArn) return
       const account = useAccountsStore.getState().accounts.get(info.id)
-      if (!account || account.credentials?.profileArn === info.profileArn) return
-      updateAccount(info.id, {
-        profileArn: info.profileArn,
-        credentials: { ...account.credentials, profileArn: info.profileArn }
-      })
-      console.log(`[App] Persisted Enterprise profileArn for ${info.id}`)
+      if (!account) return
+      const updated = applyAccountCredentialUpdate(account, info)
+      if (updated !== account) updateAccount(info.id, updated)
     })
     return () => {
       unsubscribe()

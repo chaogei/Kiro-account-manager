@@ -1,4 +1,13 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
+import {
+  applyAccountCredentialUpdate,
+  applyBackgroundAccountUpdate,
+  type BackgroundAccountUpdate,
+  preserveNewerAccountCredentials,
+  type AccountCredentialUpdate,
+  type AccountDataSnapshot
+} from '../shared/accountCredentials'
+import { isUsageSyncDue, selectionChanged } from '../shared/usageSync'
 import { autoUpdater } from 'electron-updater'
 import * as machineIdModule from './machineId'
 import { join } from 'path'
@@ -394,6 +403,13 @@ function initProxyServer(): ProxyServer {
       },
       // 账号更新回调 - 通知渲染进程更新账号数据
       onAccountUpdate: (account) => {
+        // Persist before notifying the UI: the proxy page may not be mounted.
+        persistAccountCredentialUpdate(account)
+        const live = proxyServer?.getConfig()
+        const saved = store?.get('proxyConfig') as Partial<ProxyConfig> | undefined
+        if (live && store && selectionChanged(saved?.selectedAccountIds, live.selectedAccountIds)) {
+          store.set('proxyConfig', { ...saved, selectedAccountIds: live.selectedAccountIds })
+        }
         mainWindow?.webContents.send('proxy-account-update', {
           id: account.id,
           accessToken: account.accessToken,
@@ -509,15 +525,9 @@ function initProxyServer(): ProxyServer {
   setProfileArnPersistCallback((accountId, profileArn) => {
     try {
       proxyServer?.getAccountPool().updateAccount(accountId, { profileArn })
+      persistAccountCredentialUpdate({ id: accountId, profileArn })
       // 推送 IPC，让 renderer store 把 profileArn 写入账号数据
       mainWindow?.webContents.send('proxy-account-update', { id: accountId, profileArn })
-      // 同步更新内存快照，确保下次整库落盘时带上 profileArn
-      if (lastSavedData && typeof lastSavedData === 'object') {
-        const data = lastSavedData as { accounts?: Record<string, Record<string, unknown>> }
-        if (data.accounts?.[accountId]) {
-          data.accounts[accountId] = { ...data.accounts[accountId], profileArn }
-        }
-      }
       console.log(`[ProxyServer] Persisted Enterprise profileArn for ${accountId}: ${profileArn}`)
     } catch (e) {
       console.warn('[ProxyServer] Failed to persist profileArn:', e)
@@ -1409,6 +1419,52 @@ let store: {
 // 最后保存的数据（用于崩溃恢复）
 let lastSavedData: unknown = null
 
+function persistAccountCredentialUpdate(update: AccountCredentialUpdate): void {
+  if (!store) return
+  const data = store.get('accountData') as AccountDataSnapshot | undefined
+  const account = data?.accounts?.[update.id]
+  if (!data || !account) return // An in-flight refresh must not recreate a deleted account.
+  const updated = applyAccountCredentialUpdate(account, update)
+  if (updated === account) return
+  const next = { ...data, accounts: { ...data.accounts, [update.id]: updated } }
+  store.set('accountData', next)
+  lastSavedData = next
+}
+
+function publishBackgroundRefreshResult(result: {
+  id: string
+  success: boolean
+  data?: Omit<BackgroundAccountUpdate, 'id'>
+  error?: string
+}): void {
+  if (result.success && result.data && store) {
+    const data = store.get('accountData') as AccountDataSnapshot | undefined
+    const account = data?.accounts?.[result.id]
+    if (data && account) {
+      const next = {
+        ...data,
+        accounts: {
+          ...data.accounts,
+          [result.id]: applyBackgroundAccountUpdate(account, { ...result.data, id: result.id })
+        }
+      }
+      store.set('accountData', next)
+      lastSavedData = next
+    }
+  }
+  mainWindow?.webContents.send('background-refresh-result', result)
+}
+
+function saveAccountSnapshot(data: unknown): unknown {
+  const next = preserveNewerAccountCredentials(
+    data as AccountDataSnapshot,
+    store!.get('accountData') as AccountDataSnapshot | undefined
+  )
+  store!.set('accountData', next)
+  lastSavedData = next
+  return next
+}
+
 async function initStore(): Promise<void> {
   if (store) return
   const Store = (await import('electron-store')).default
@@ -1869,9 +1925,9 @@ const PROACTIVE_RENEWAL_LEAD_MS = 15 * 60 * 1000
 //
 // 背景：原先只有渲染进程的 setInterval 调度池内 token 刷新，窗口最小化到托盘后会被
 // Chromium 后台节流，导致 token 过期数分钟才刷新。这里把"调度"搬到主进程：主进程定时器
-// 不受窗口可见性影响，到点读 store 里的账号、刷新即将过期的 token，结果经
-// background-refresh-result 事件回流给渲染进程持久化（窗口隐藏但仍存活）。
-// 渲染进程定时器保留（已关后台节流）做信息同步/自动换号；两边的 token 刷新由
+// 不受窗口可见性影响，到点读 store 里的账号、刷新即将过期的 token。
+// 结果先在主进程持久化，再通过 background-refresh-result 通知界面。
+// 渲染进程定时器保留做信息同步/自动换号；主进程也按设置兜底同步用量，token 刷新由
 // poolRefreshInFlightIds 去重，避免对同一 refreshToken 并发刷新把其中一个用作废。
 type BackgroundRefreshAccount = {
   id: string
@@ -1897,6 +1953,8 @@ let backgroundBatchRefreshImpl:
 /** 正在刷新中的账号 ID 去重集合，渲染进程与主进程调度器共享，防止同一 refreshToken 被并发刷新。 */
 const poolRefreshInFlightIds = new Set<string>()
 let mainPoolRefreshTimer: NodeJS.Timeout | null = null
+let lastOfficialUsageSyncAt = 0
+let mainPoolRefreshRunning = false
 
 /** 主进程侧的封禁/挂起判定，镜像渲染进程的 isBannedAccountError */
 function isBannedAccountErrorMain(error?: string): boolean {
@@ -1915,9 +1973,10 @@ function mainTokenRefreshLeadMs(intervalMin: number): number {
   return Math.max(intervalMin * 2 * 60 * 1000, 10 * 60 * 1000)
 }
 
-/** 读取 store 里的账号，刷新即将过期的池内 token（仅刷 token，信息同步仍由渲染进程负责）。 */
+/** 读取最新凭据，刷新即将过期的 token，并在信息同步到期时查询官方用量。 */
 async function runMainPoolTokenRefreshTick(): Promise<void> {
-  if (!backgroundBatchRefreshImpl) return
+  if (!backgroundBatchRefreshImpl || mainPoolRefreshRunning) return
+  mainPoolRefreshRunning = true
   try {
     if (!store) { await initStore() }
     if (!store) return
@@ -1942,6 +2001,7 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
         }
       }>
       autoRefreshEnabled?: boolean
+      autoRefreshSyncInfo?: boolean
       autoRefreshInterval?: number
       autoRefreshConcurrency?: number
     } | undefined
@@ -1952,6 +2012,7 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
     const leadMs = mainTokenRefreshLeadMs(intervalMin)
     const concurrency = Math.max(1, Math.min(500, data.autoRefreshConcurrency ?? 100))
     const now = Date.now()
+    const syncInfo = isUsageSyncDue(data, lastOfficialUsageSyncAt, now)
 
     const toRefresh: BackgroundRefreshAccount[] = []
     for (const [id, acc] of Object.entries(data.accounts)) {
@@ -1959,13 +2020,14 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
       if (!creds?.refreshToken) continue
       if (isBannedAccountErrorMain(acc.lastError)) continue
       const expiresAt = creds.expiresAt
-      // 只刷"即将过期/已过期"的；没有 expiresAt 的跳过（无从判断）
-      if (!expiresAt || expiresAt - now > leadMs) continue
+      // 未到信息同步时间时，只刷新即将过期或缺少过期时间的 token。
+      const needsTokenRefresh = !expiresAt || expiresAt - now <= leadMs
+      if (!syncInfo && !needsTokenRefresh) continue
       toRefresh.push({
         id,
         idp: acc.idp,
         profileArn: acc.profileArn,
-        needsTokenRefresh: true,
+        needsTokenRefresh,
         machineId: acc.machineId,
         credentials: {
           refreshToken: creds.refreshToken,
@@ -1982,10 +2044,12 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
 
     if (toRefresh.length === 0) return
     console.log(`[MainPoolRefresh] ${toRefresh.length} token(s) expiring within ${Math.round(leadMs / 60000)}min, refreshing...`)
-    // syncInfo=false：仅刷 token；用量/订阅等信息同步由渲染进程定时器负责，避免主进程跑重活
-    await backgroundBatchRefreshImpl(toRefresh, concurrency, false)
+    // Share the batch and account locks with renderer refreshes.
+    await backgroundBatchRefreshImpl(toRefresh, concurrency, syncInfo)
   } catch (err) {
     console.warn('[MainPoolRefresh] tick failed:', err instanceof Error ? err.message : err)
+  } finally {
+    mainPoolRefreshRunning = false
   }
 }
 
@@ -2343,7 +2407,7 @@ function createWindow(): void {
     if (lastSavedData && store) {
       try {
         console.log('[Window] Saving data before close...')
-        store.set('accountData', lastSavedData)
+        saveAccountSnapshot(lastSavedData)
         // 备份异步进行，不阻塞关闭
         createBackup(lastSavedData).then(() => {
           console.log('[Window] Backup created')
@@ -2957,13 +3021,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('save-accounts', async (_event, data) => {
     try {
       await initStore()
-      store!.set('accountData', data)
-      
-      // 保存最后的数据（用于崩溃恢复）
-      lastSavedData = data
+      const saved = saveAccountSnapshot(data)
       
       // 每次保存时也创建备份
-      await createBackup(data)
+      await createBackup(saved)
     } catch (error) {
       console.error('Failed to save accounts:', error)
       throw error
@@ -3634,6 +3695,11 @@ app.whenReady().then(async () => {
           }
           if (account.id) poolRefreshInFlightIds.add(account.id)
           try {
+            const saved = (store?.get('accountData') as {
+              accounts?: Record<string, { credentials?: BackgroundRefreshAccount['credentials'] }>
+            } | undefined)?.accounts?.[account.id]
+            if (!saved) return // Do not restore an account deleted while this batch was waiting.
+            account = { ...account, credentials: { ...account.credentials, ...saved.credentials } }
             const { refreshToken, clientId, clientSecret, region, authMethod, accessToken, provider } = account.credentials
             const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
 
@@ -3676,7 +3742,7 @@ app.whenReady().then(async () => {
                 failed++
                 completed++
                 // 通知渲染进程刷新失败
-                mainWindow?.webContents.send('background-refresh-result', {
+                publishBackgroundRefreshResult({
                   id: account.id,
                   success: false,
                   error: refreshResult.error
@@ -3687,6 +3753,13 @@ app.whenReady().then(async () => {
               newAccessToken = refreshResult.accessToken || accessToken
               newRefreshToken = refreshResult.refreshToken || refreshToken
               newExpiresIn = refreshResult.expiresIn
+              // Save rotated credentials before any subsequent network request can fail.
+              persistAccountCredentialUpdate({
+                id: account.id,
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                expiresAt: newExpiresIn ? Date.now() + newExpiresIn * 1000 : undefined
+              })
 
               // 仅当该账号是 Kiro IDE 当前激活账号时，同步新 token 到磁盘 token 文件。
               // 否则 IDE 在 ~50min 后会用磁盘上"被自动刷新作废"的旧 refreshToken 调 OIDC → 401 → logoutAndForget。
@@ -3942,7 +4015,7 @@ app.whenReady().then(async () => {
             completed++
 
             // 通知渲染进程更新账号
-            mainWindow?.webContents.send('background-refresh-result', {
+            publishBackgroundRefreshResult({
               id: account.id,
               success: true,
               data: {
@@ -3960,7 +4033,7 @@ app.whenReady().then(async () => {
           } catch (e) {
             failed++
             completed++
-            mainWindow?.webContents.send('background-refresh-result', {
+            publishBackgroundRefreshResult({
               id: account.id,
               success: false,
               error: e instanceof Error ? e.message : 'Unknown error'
@@ -3985,6 +4058,7 @@ app.whenReady().then(async () => {
       }
     }
 
+    if (syncInfo) lastOfficialUsageSyncAt = Date.now()
     console.log(`[BackgroundRefresh] Completed: ${success} success, ${failed} failed`)
     return { success: true, completed, successCount: success, failedCount: failed }
   }
@@ -7307,7 +7381,7 @@ app.on('will-quit', async (event) => {
       console.log('[Exit] Saving data before quit...')
       // 刷新待写入的防抖数据
       flushStoreWrites()
-      store.set('accountData', lastSavedData)
+      saveAccountSnapshot(lastSavedData)
       // 退出场景跳过节流，确保备份立即落盘
       await createBackup(lastSavedData)
       await flushBackupNow()
