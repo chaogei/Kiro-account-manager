@@ -179,9 +179,10 @@ export interface ClaudeRequest {
 }
 
 export interface ClaudeMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string | ClaudeContentBlock[]
   cache_control?: ClaudeCacheControl
+  clear_at?: 'never' | 'next_user_message'
 }
 
 export interface ClaudeSystemBlock {

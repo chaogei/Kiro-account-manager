@@ -814,6 +814,33 @@ export function claudeToKiro(
     }).join('\n')
   }
 
+  // Claude Code can append hook context as a system message after the user turn.
+  // Kiro has no system message role, so retain text in the existing system prelude.
+  const messages = request.messages.filter(message => message.role !== 'system')
+  const lastUserIndex = request.messages.map(message => message.role).lastIndexOf('user')
+  for (let index = 0; index < request.messages.length; index++) {
+    const message = request.messages[index]
+    if (message.role !== 'system') continue
+    if (message.clear_at !== undefined && message.clear_at !== 'never' && message.clear_at !== 'next_user_message') {
+      throw new Error('Unsupported system message clear_at')
+    }
+    if (message.clear_at === 'next_user_message' && index < lastUserIndex) continue
+
+    const blocks = typeof message.content === 'string'
+      ? [{ type: 'text' as const, text: message.content }]
+      : message.content
+    if (!Array.isArray(blocks)) {
+      throw new Error('System message content must be text')
+    }
+    for (const block of blocks) {
+      if (!block || block.type !== 'text' || typeof block.text !== 'string') {
+        throw new Error('Unsupported non-text system message')
+      }
+      systemPrompt += (systemPrompt ? '\n' : '') + block.text
+      systemCachePoint = mergeCachePoint(systemCachePoint, toKiroCachePoint(block.cache_control || message.cache_control))
+    }
+  }
+
   // 注入时间戳
   const timestamp = new Date().toISOString()
   systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
@@ -847,9 +874,9 @@ export function claudeToKiro(
   let pendingToolResults: KiroToolResult[] = []
   let pendingUserCachePoint: KiroCachePoint | undefined
 
-  for (let i = 0; i < request.messages.length; i++) {
-    const msg = request.messages[i]
-    const isLast = i === request.messages.length - 1
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]
+    const isLast = i === messages.length - 1
 
     if (msg.role === 'user') {
       const { content: userContent, images: userImages, documents: userDocuments, toolResults: userToolResults, cachePoint: userCachePoint } = extractClaudeContent(msg)
@@ -868,7 +895,7 @@ export function claudeToKiro(
         pendingUserCachePoint = undefined
       } else {
         // 非最后一条：检查下一条是否是 assistant
-        const nextMsg = request.messages[i + 1]
+        const nextMsg = messages[i + 1]
         if (nextMsg && nextMsg.role === 'assistant') {
           // 下一条是 assistant，可以安全添加到 history
           const finalUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
