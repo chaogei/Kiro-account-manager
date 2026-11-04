@@ -128,7 +128,7 @@ npm run typecheck   # → exit 0
    跨账号的 profile 选择依赖 CLI 自身的 ListAvailableProfiles 自愈（离线无法验证）。
 4. social（Google/Github）路径按未合并 PR #121 的字段实现（`provider`、`profile_arn`），
    本机没有 social 账号，未做真机验证。
-4. Windows / Linux 路径按 Rust `dirs` crate 语义实现（`%LOCALAPPDATA%\kiro-cli`、
+5. Windows / Linux 路径按 Rust `dirs` crate 语义实现（`%LOCALAPPDATA%\kiro-cli`、
    `$XDG_DATA_HOME/kiro-cli`），本机（macOS）无法实测这两个平台；路径解析有单测覆盖。
    Windows 目录名 `kiro-cli` 与 CLI 官方 Windows 构建内 `paths.rs` 的 `"kiro-cli"` 字面量一致
    （NTFS 大小写不敏感，参考脚本的 `Kiro-Cli` 也能命中同一目录）。

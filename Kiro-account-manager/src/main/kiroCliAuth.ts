@@ -418,7 +418,10 @@ function writeWithSqlite3Cli(dbPath: string, records: KiroCliAuthRecords): void 
   execFileSync(sqlite3Bin, [dbPath], {
     input: statements.join('\n'),
     timeout: 10000,
-    encoding: 'utf-8'
+    encoding: 'utf-8',
+    // 显式 pipe 掉子进程 stderr：sqlite3 报错时可能回显失败 SQL（含 token JSON），
+    // 不能让它继承到 Electron main 的 stderr / 日志里。error.stderr 也不会被转发。
+    stdio: ['pipe', 'pipe', 'pipe']
   })
 }
 
@@ -443,13 +446,18 @@ export async function writeKiroCliAuthRecords(
     writeWithSqlite3Cli(dbPath, records)
   } catch (sqlite3Error) {
     // 不要透传 sqlite3 的 stderr/message：失败 SQL 里含 token JSON，可能被日志/UI 回显。
-    const exitCode = (sqlite3Error as { status?: number | null }).status
+    const failure = sqlite3Error as { status?: number | null; code?: string }
+    const exitCode = failure.status
+    const commandMissing = failure.code === 'ENOENT'
     console.warn('[KiroCLI] sqlite3 CLI 写入失败（详细错误已省略，避免泄漏凭证内容）')
     console.warn('[KiroCLI] node:sqlite 不可用原因:', (nodeSqliteError as Error)?.name ?? 'unknown')
     throw new Error(
-      `写入 Kiro CLI 数据库失败（${dbPath}）：sqlite3 命令执行失败` +
-        `${typeof exitCode === 'number' ? `（exit ${exitCode}）` : ''}，且 node:sqlite 不可用。` +
-        '请确认数据库未被 kiro-cli 占用后重试。'
+      commandMissing
+        ? `写入 Kiro CLI 数据库失败（${dbPath}）：系统未找到 sqlite3 命令，且 node:sqlite 不可用。` +
+          '请安装 sqlite3 或使用较新的 Electron 运行时。'
+        : `写入 Kiro CLI 数据库失败（${dbPath}）：sqlite3 命令执行失败` +
+          `${typeof exitCode === 'number' ? `（exit ${exitCode}）` : ''}，且 node:sqlite 不可用。` +
+          '请确认数据库未被 kiro-cli 占用后重试。'
     )
   }
 }
