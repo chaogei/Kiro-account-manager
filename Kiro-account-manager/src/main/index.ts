@@ -25,7 +25,12 @@ import {
   resolveProfileArnForWrite,
   KIRO_AUTH_TOKEN_PATH
 } from './kiroAuthSync'
-import { applyKiroCliAuth, buildKiroCliAuthRecords, resolveKiroCliAuthMethod } from './kiroCliAuth'
+import {
+  applyKiroCliAuth,
+  buildKiroCliAuthRecords,
+  resolveKiroCliAuthMethod,
+  shouldSyncTrackedKiroCliAuth
+} from './kiroCliAuth'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
@@ -1458,6 +1463,24 @@ async function initStore(): Promise<void> {
   } catch (e) {
     console.warn('[ProactiveRenewal] Failed to load setting:', e)
   }
+
+  // 恢复「最近成功切到 CLI 的账号」记录：App 重启后，主动续期/后台刷新/IDE 自刷新
+  // 仍能把轮换后的 token 同步回 kiro-cli 数据库。
+  try {
+    const restored = storeInstance.get('kiroCliTracking') as KiroCliTrackedAuth | undefined
+    if (
+      restored &&
+      typeof restored.accountId === 'string' &&
+      typeof restored.accessToken === 'string' &&
+      typeof restored.refreshToken === 'string' &&
+      typeof restored.region === 'string'
+    ) {
+      kiroCliTrackedAuth = restored
+      console.log('[KiroCLI] Restored tracked CLI account:', restored.accountId)
+    }
+  } catch (e) {
+    console.warn('[KiroCLI] Failed to restore CLI tracking:', e)
+  }
 }
 
 // ============ Kiro IDE Auth Token 反向同步 ============
@@ -1588,6 +1611,17 @@ async function syncIdeTokenChangeToStore(token: {
   console.log(
     `[KiroAuthSync] Synced IDE-refreshed token back to account ${accountToUpdate.email || matchedId} (${matchedReason})`
   )
+
+  // 若 IDE 自己 refresh 的账号正是「最近成功切到 CLI 的账号」（both 模式），
+  // 把同一份新 token 也写进 kiro-cli 数据库，避免 CLI 端的 refreshToken 被轮换作废。
+  const tokenExpiresAt = Date.parse(token.expiresAt)
+  await maybeSyncTrackedKiroCliAuth(matchedId, {
+    accessToken: token.accessToken,
+    refreshToken: token.refreshToken,
+    expiresIn: Number.isFinite(tokenExpiresAt)
+      ? Math.max(1, Math.round((tokenExpiresAt - Date.now()) / 1000))
+      : 3600
+  })
 
   try {
     mainWindow?.webContents.send('kiro-ide-token-changed', {
@@ -1731,6 +1765,14 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
     store.set('accountData', accountData)
   }
 
+  // 2.5 若该账号也是「最近成功切到 CLI 的账号」，把轮换后的 token 同步写进 kiro-cli 数据库，
+  //     否则 CLI 手里的 refreshToken 会在下一次使用时被判定失效（“用一会儿又掉登录”）。
+  await maybeSyncTrackedKiroCliAuth(accountId, {
+    accessToken: newAccess,
+    refreshToken: newRefresh,
+    expiresIn
+  })
+
   // 3. 通知 renderer reload
   try {
     mainWindow?.webContents.send('kiro-ide-token-changed', {
@@ -1855,6 +1897,88 @@ let lastSwitchedAccountId: string | null = null
 let lastWrittenTokenSignature: string | null = null
 // 上一次反向同步成功时刷写过的 store 数据签名，用于 dedupe webContents.send
 let lastSyncedFromIdeSignature: string | null = null
+
+// 上一次成功写入 kiro-cli 数据库的账号（Switch Target = cli / both 时记录）。
+// App 自己发起的 refresh（主动续期/手动刷新/后台批量刷新）轮换 refreshToken 后，
+// 需要把同一份新 token 同步回 CLI，否则 CLI 手里的是会被轮换作废的旧 refreshToken。
+interface KiroCliTrackedAuth {
+  accountId: string
+  accessToken: string
+  refreshToken: string
+  region: string
+  startUrl?: string
+  provider?: string
+  authMethod?: string
+  clientId?: string
+  clientSecret?: string
+  profileArn?: string
+}
+let kiroCliTrackedAuth: KiroCliTrackedAuth | null = null
+
+/** 当前「切号目标」设置（以 renderer 通过 save-accounts 持久化的 accountData 为准） */
+function getKiroCliSwitchTarget(): 'ide' | 'cli' | 'both' {
+  try {
+    const data = store?.get('accountData') as { switchTarget?: string } | undefined
+    const target = data?.switchTarget
+    return target === 'cli' || target === 'both' ? target : 'ide'
+  } catch {
+    return 'ide'
+  }
+}
+
+/**
+ * App 主动刷新 token 后，若本次刷新的账号正是「最近一次成功切到 CLI 的账号」，
+ * 把新的 access/refresh token 也写进 kiro-cli 的 auth_kv（best-effort，绝不影响主刷新流程）。
+ */
+async function maybeSyncTrackedKiroCliAuth(
+  accountId: string | undefined,
+  refreshed: { accessToken: string; refreshToken: string; expiresIn?: number }
+): Promise<void> {
+  const tracked = kiroCliTrackedAuth
+  if (!tracked || !accountId) return
+  if (
+    !shouldSyncTrackedKiroCliAuth({
+      switchTarget: getKiroCliSwitchTarget(),
+      trackedAccountId: tracked.accountId,
+      accountId
+    })
+  ) {
+    return
+  }
+  try {
+    const records = buildKiroCliAuthRecords({
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      expiresAtIso: new Date(Date.now() + (refreshed.expiresIn && refreshed.expiresIn > 0 ? refreshed.expiresIn : 3600) * 1000).toISOString(),
+      region: tracked.region,
+      startUrl: tracked.startUrl,
+      provider: tracked.provider,
+      authMethod: tracked.authMethod,
+      clientId: tracked.clientId,
+      clientSecret: tracked.clientSecret,
+      profileArn: tracked.profileArn
+    })
+    const { dbPath } = await applyKiroCliAuth(records)
+    tracked.accessToken = refreshed.accessToken
+    tracked.refreshToken = refreshed.refreshToken
+    persistKiroCliTracking()
+    console.log(`[KiroCLI] Synced refreshed token to kiro-cli for tracked account ${tracked.accountId} (${dbPath})`)
+  } catch (error) {
+    console.warn(
+      '[KiroCLI] Failed to sync refreshed token to kiro-cli (best-effort):',
+      error instanceof Error ? error.message : error
+    )
+  }
+}
+
+/** 持久化跟踪状态（App 重启后仍可继续同步 CLI） */
+function persistKiroCliTracking(): void {
+  try {
+    store?.set('kiroCliTracking', kiroCliTrackedAuth)
+  } catch (e) {
+    console.warn('[KiroCLI] Failed to persist CLI tracking:', e)
+  }
+}
 
 // ============ 主动续期（Proactive Token Renewal） ============
 // 思路：在 Kiro IDE 内部 refresh loop 触发之前（token 剩 10 分钟时）抢先 refresh，
@@ -3010,6 +3134,13 @@ app.whenReady().then(async () => {
       const newRefresh = refreshResult.refreshToken || refreshToken
       const expiresIn = refreshResult.expiresIn ?? 3600
 
+      // 若该账号是「最近成功切到 CLI 的账号」，把轮换后的 token 同步进 kiro-cli 数据库
+      await maybeSyncTrackedKiroCliAuth(account.id, {
+        accessToken: newAccess,
+        refreshToken: newRefresh,
+        expiresIn
+      })
+
       // bug B 修复：仅当该账号是 Kiro IDE 当前激活账号时，同步写入磁盘 token 文件
       // 判定优先级（任一命中即视为"是当前激活账号"）：
       //   1) 磁盘 token 的 refreshToken === renderer 传入的 account.credentials.refreshToken（最准）
@@ -3688,6 +3819,15 @@ app.whenReady().then(async () => {
               newAccessToken = refreshResult.accessToken || accessToken
               newRefreshToken = refreshResult.refreshToken || refreshToken
               newExpiresIn = refreshResult.expiresIn
+
+              // 若该账号是「最近成功切到 CLI 的账号」，同步 kiro-cli 数据库（best-effort）
+              if (newAccessToken && newRefreshToken) {
+                await maybeSyncTrackedKiroCliAuth(account.id, {
+                  accessToken: newAccessToken,
+                  refreshToken: newRefreshToken,
+                  expiresIn: newExpiresIn ?? 3600
+                })
+              }
 
               // 仅当该账号是 Kiro IDE 当前激活账号时，同步新 token 到磁盘 token 文件。
               // 否则 IDE 在 ~50min 后会用磁盘上"被自动刷新作废"的旧 refreshToken 调 OIDC → 401 → logoutAndForget。
@@ -4877,6 +5017,24 @@ app.whenReady().then(async () => {
           const applied = await applyKiroCliAuth(records)
           cliDbPath = applied.dbPath
           console.log(`[Switch CLI] Saved ${records.tokenKey} to`, cliDbPath)
+
+          // 记录「最近成功切到 CLI 的账号」：之后 App 主动 refresh 时要把新 token 一并写回
+          // CLI 数据库，避免 CLI 手里的 refreshToken 被 Rotate 作废。
+          if (accountId) {
+            kiroCliTrackedAuth = {
+              accountId,
+              accessToken: finalAccessToken,
+              refreshToken: finalRefreshToken,
+              region,
+              startUrl,
+              provider,
+              authMethod,
+              clientId,
+              clientSecret,
+              profileArn: resolvedProfileArn
+            }
+            persistKiroCliTracking()
+          }
         } catch (error) {
           cliError = error instanceof Error ? error.message : String(error)
           console.error('[Switch CLI] Failed to write kiro-cli credentials:', cliError)
@@ -4931,6 +5089,9 @@ app.whenReady().then(async () => {
     clearProactiveRenewal('logout-account')
     lastSwitchedAccountId = null
     lastWrittenTokenSignature = null
+    // 退出登录后不要再把后续 refresh 同步写进 CLI（CLI 的登录态由用户自行处理）
+    kiroCliTrackedAuth = null
+    persistKiroCliTracking()
 
     try {
       const ssoCache = path.join(os.homedir(), '.aws', 'sso', 'cache')

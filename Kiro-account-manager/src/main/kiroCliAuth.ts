@@ -150,6 +150,26 @@ export function resolveKiroCliAuthMethod(input: KiroCliAuthMethodInput): KiroCli
   }
 }
 
+/**
+ * 判断一次 App 发起的 token refresh 是否需要顺带把 kiro-cli 的 auth_kv 一起更新。
+ *
+ * 背景：kiro-cli 与 App 共用同一份 client registration / refresh token 族。切号时 App 只写一次
+ * CLI 数据库是不够的 —— 之后 App 的主动续期/手动刷新/后台批量刷新会继续轮换 refreshToken，
+ * 若不同步 CLI，CLI 手里的 refreshToken 就会过期（表现为“用一会儿又掉登录”）。
+ *
+ * 规则：只有 (a) 当前切号目标包含 CLI，(b) 本次刷新的账号正是上一次成功写入 CLI 的账号，
+ * 才同步；目标改为 ide 或刷新的是别的账号时不动 CLI。
+ */
+export function shouldSyncTrackedKiroCliAuth(input: {
+  switchTarget?: string
+  trackedAccountId?: string | null
+  accountId?: string | null
+}): boolean {
+  if (!input.trackedAccountId || !input.accountId) return false
+  if (input.trackedAccountId !== input.accountId) return false
+  return input.switchTarget === 'cli' || input.switchTarget === 'both'
+}
+
 /** 去掉 start URL 末尾的 "/"（与 kiro-ide-auth-to-cli.py、CLI 实际记录一致） */
 export function normalizeStartUrl(value: string): string {
   return value.trim().replace(/\/+$/, '')

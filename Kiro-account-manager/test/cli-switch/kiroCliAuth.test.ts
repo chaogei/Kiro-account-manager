@@ -33,6 +33,7 @@ import {
   resolveCliStartUrl,
   resolveKiroCliAuthMethod,
   resolveKiroCliPaths,
+  shouldSyncTrackedKiroCliAuth,
   startUrlFromClientSecret,
   writeKiroCliAuthRecords
 } from '../../src/main/kiroCliAuth.ts'
@@ -213,6 +214,42 @@ test('竞争 key 清理：删除 social / codewhisperer / external-idp，保留�
   assert.ok(social.staleKeys.includes(KIRO_CLI_IDC_TOKEN_KEY))
   assert.ok(!social.staleKeys.includes(KIRO_CLI_SOCIAL_TOKEN_KEY))
   assert.equal(social.removeRegistration, true)
+})
+
+// ============ App 主动 refresh 时的 CLI 同步判定 ============
+
+test('只有目标含 cli 且刷新账号 == 最近切到 CLI 的账号时才同步 kiro-cli', () => {
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'both', trackedAccountId: 'acc-1', accountId: 'acc-1' }),
+    true
+  )
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'cli', trackedAccountId: 'acc-1', accountId: 'acc-1' }),
+    true
+  )
+  // 目标不含 CLI 时不动 CLI 数据库
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'ide', trackedAccountId: 'acc-1', accountId: 'acc-1' }),
+    false
+  )
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: undefined, trackedAccountId: 'acc-1', accountId: 'acc-1' }),
+    false
+  )
+  // 刷新的是其它账号时不动 CLI
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'both', trackedAccountId: 'acc-1', accountId: 'acc-2' }),
+    false
+  )
+  // 还没有成功切过 CLI
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'both', trackedAccountId: null, accountId: 'acc-1' }),
+    false
+  )
+  assert.equal(
+    shouldSyncTrackedKiroCliAuth({ switchTarget: 'both', trackedAccountId: 'acc-1', accountId: undefined }),
+    false
+  )
 })
 
 // ============ social 记录字段 ============

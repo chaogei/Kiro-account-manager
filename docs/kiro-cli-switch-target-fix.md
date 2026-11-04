@@ -118,10 +118,16 @@ npm run typecheck   # → exit 0
 
 ## 已知限制 / 后续可做
 
-1. **App 主动续期与 CLI 的 token 轮换**：proactive renewal / 手动刷新 / 后台批量刷新
-   仍只写 IDE token 文件（不写 CLI 数据库）。若服务端严格轮换 refreshToken 并使旧值失效，
-   CLI 在 App 下一次轮换后可能过期。彻底的方案是让所有 App 发起的 refresh 在
-   “当前 CLI 切号账号”上同步写 CLI（需要 main 进程知道 switchTarget 与最近 CLI 切换账号）。
+1. **App 发起的 refresh 已同步 CLI（本次新增）**：成功切到 CLI 的账号会被 main 进程记录
+   （`kiroCliTrackedAuth`，持久化在 electron-store 的 `kiroCliTracking`，App 重启后恢复）。
+   之后这些路径轮换 token 时会把新 token 一并写回 kiro-cli 数据库（仅当切号目标仍含 CLI
+   且刷新的正是该账号，best-effort，失败只记日志）：
+   - 主动续期（proactive renewal）；
+   - 手动刷新（`refresh-account-token`）；
+   - 后台批量刷新（`background-batch-refresh`）；
+   - IDE 自己 refresh 写入 token 文件后的反向同步（fs.watch）。
+   仍未覆盖：反向代理自己的内存内刷新（不落盘）；以及 CLI 自己 refresh 后 App store 里
+   可能留下旧 RT（共享 registration 的双 rotator 问题）。
 2. **两个 rotator 共存**：IDE 与 CLI 共享同一 client registration / refresh token 族，
    两边各自 refresh 时仍可能出现竞争；本次修复保证「切号」这一步一致。
 3. CLI 自己还会把 profile/start-url 缓存到 `state` 表；本次只按参考脚本的 scope 更新 `auth_kv`，
