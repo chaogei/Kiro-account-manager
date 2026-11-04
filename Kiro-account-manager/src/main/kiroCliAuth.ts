@@ -91,6 +91,9 @@ export function resolveKiroCliPaths(options: KiroCliPathOptions = {}): KiroCliPa
   }
 
   if (platform === 'win32') {
+    // kiro-cli 的 Windows 目录是 %LOCALAPPDATA%\kiro-cli（官方 Windows 构建里
+    // paths.rs 的 "kiro-cli" 字面量与 "data.sqlite3" 相邻；NTFS 大小写不敏感，
+    // 旧参考脚本用的 "Kiro-Cli" 也能命中同一目录，这里与 CLI 自身保持一致）。
     const localAppData = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local')
     const dataDir = path.join(localAppData, 'kiro-cli')
     return { dataDir, dbPath: path.join(dataDir, 'data.sqlite3') }
@@ -439,9 +442,14 @@ export async function writeKiroCliAuthRecords(
   try {
     writeWithSqlite3Cli(dbPath, records)
   } catch (sqlite3Error) {
+    // 不要透传 sqlite3 的 stderr/message：失败 SQL 里含 token JSON，可能被日志/UI 回显。
+    const exitCode = (sqlite3Error as { status?: number | null }).status
+    console.warn('[KiroCLI] sqlite3 CLI 写入失败（详细错误已省略，避免泄漏凭证内容）')
+    console.warn('[KiroCLI] node:sqlite 不可用原因:', (nodeSqliteError as Error)?.name ?? 'unknown')
     throw new Error(
-      `写入 Kiro CLI 数据库失败（${dbPath}）：${(sqlite3Error as Error).message}` +
-        `；node:sqlite 错误：${(nodeSqliteError as Error)?.message ?? String(nodeSqliteError)}`
+      `写入 Kiro CLI 数据库失败（${dbPath}）：sqlite3 命令执行失败` +
+        `${typeof exitCode === 'number' ? `（exit ${exitCode}）` : ''}，且 node:sqlite 不可用。` +
+        '请确认数据库未被 kiro-cli 占用后重试。'
     )
   }
 }
@@ -462,7 +470,8 @@ export async function applyKiroCliAuth(
   records: KiroCliAuthRecords,
   options: ApplyKiroCliAuthOptions = {}
 ): Promise<{ dbPath: string }> {
-  const dbPath = options.dbPath ?? resolveKiroCliPaths(options).dbPath
+  const paths = resolveKiroCliPaths(options)
+  const dbPath = options.dbPath ?? paths.dbPath
   if (!options.dbPath) {
     let dbExists = false
     try {
@@ -472,8 +481,18 @@ export async function applyKiroCliAuth(
       dbExists = false
     }
     if (!dbExists) {
+      // macOS 上旧版本 App 曾把数据写到 ~/.local/share/kiro-cli（CLI 不读取），这里仅做提示。
+      let legacyHint = ''
+      if (paths.legacyDbPath) {
+        try {
+          await fs.access(paths.legacyDbPath)
+          legacyHint = ` 注意：检测到旧版本误写的数据库 ${paths.legacyDbPath}，kiro-cli 不会读取它，可自行删除。`
+        } catch {
+          /* no legacy db */
+        }
+      }
       throw new Error(
-        `未找到 Kiro CLI 数据库：${dbPath}。请先运行一次 kiro-cli login 完成初始化，再重试切号。`
+        `未找到 Kiro CLI 数据库：${dbPath}。请先运行一次 kiro-cli login 完成初始化，再重试切号。${legacyHint}`
       )
     }
   }

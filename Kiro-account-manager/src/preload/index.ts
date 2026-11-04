@@ -135,7 +135,7 @@ const api = {
     region?: string
     startUrl?: string
     authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise'
+    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise' | 'IAM_SSO'
     profileArn?: string
     accountId?: string
     /** 切号目标：ide=只写 IDE（默认），cli=只写 kiro-cli，both=两者 */

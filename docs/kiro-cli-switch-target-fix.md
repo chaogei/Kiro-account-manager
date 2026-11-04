@@ -65,8 +65,8 @@ kiro-cli 2.x 实际需要（以本机 CLI 自己写出的记录为准）：
 ```
 
 缺 `oauth_flow` → `missing field 'oauth_flow'`（issue #125）；
-缺 registration 的 `client_secret_expires_at` → 首次 refresh 时
-`no expiration time found for the client secret` 类错误。
+缺 registration 的 `client_secret_expires_at` → **加载 token 时**就报
+`missing field 'client_secret_expires_at'`，CLI 直接视为未登录（实测）。
 
 ### 3. rotating refreshToken 被丢弃 / both 模式二次 refresh
 
@@ -124,7 +124,11 @@ npm run typecheck   # → exit 0
    “当前 CLI 切号账号”上同步写 CLI（需要 main 进程知道 switchTarget 与最近 CLI 切换账号）。
 2. **两个 rotator 共存**：IDE 与 CLI 共享同一 client registration / refresh token 族，
    两边各自 refresh 时仍可能出现竞争；本次修复保证「切号」这一步一致。
-3. social（Google/Github）路径按未合并 PR #121 的字段实现（`provider`、`profile_arn`），
+3. CLI 自己还会把 profile/start-url 缓存到 `state` 表；本次只按参考脚本的 scope 更新 `auth_kv`，
+   跨账号的 profile 选择依赖 CLI 自身的 ListAvailableProfiles 自愈（离线无法验证）。
+4. social（Google/Github）路径按未合并 PR #121 的字段实现（`provider`、`profile_arn`），
    本机没有 social 账号，未做真机验证。
 4. Windows / Linux 路径按 Rust `dirs` crate 语义实现（`%LOCALAPPDATA%\kiro-cli`、
    `$XDG_DATA_HOME/kiro-cli`），本机（macOS）无法实测这两个平台；路径解析有单测覆盖。
+   Windows 目录名 `kiro-cli` 与 CLI 官方 Windows 构建内 `paths.rs` 的 `"kiro-cli"` 字面量一致
+   （NTFS 大小写不敏感，参考脚本的 `Kiro-Cli` 也能命中同一目录）。
