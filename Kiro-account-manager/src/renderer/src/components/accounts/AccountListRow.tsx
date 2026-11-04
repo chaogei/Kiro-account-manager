@@ -147,16 +147,10 @@ function AccountListRowComponent({
       return
     }
 
-    const cliPayload = {
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId,
-      clientSecret: credentials.clientSecret,
-      region: credentials.region || 'us-east-1',
-      profileArn: account.profileArn,
-      provider: credentials.provider
-    }
-    const idePayload = {
+    // 按「切号目标」把凭证写入对应客户端；main 进程统一 refresh 一次，避免 both 模式
+    // IDE 轮换 refreshToken 后 CLI 再用旧 token 二次 refresh（导致 CLI 登录态失效）。
+    const target = switchTarget || 'ide'
+    const result = await window.api.switchAccount({
       accessToken: credentials.accessToken,
       refreshToken: credentials.refreshToken,
       clientId: credentials.clientId || '',
@@ -166,48 +160,36 @@ function AccountListRowComponent({
       authMethod: credentials.authMethod,
       provider: credentials.provider,
       profileArn: account.profileArn,
-      accountId: account.id
+      accountId: account.id,
+      target
+    })
+
+    // 无论成功与否，main 进程都可能已经轮换了 refreshToken，必须同步回 store
+    if (result.refreshedCredentials) {
+      const rc = result.refreshedCredentials
+      useAccountsStore.setState((state) => {
+        const accounts = new Map(state.accounts)
+        const acc = accounts.get(account.id)
+        if (acc) {
+          accounts.set(account.id, {
+            ...acc,
+            credentials: {
+              ...acc.credentials,
+              accessToken: rc.accessToken,
+              refreshToken: rc.refreshToken,
+              expiresAt: Date.now() + rc.expiresIn * 1000
+            }
+          })
+        }
+        return { accounts }
+      })
+      useAccountsStore.getState().saveToStorage()
     }
 
-    let success = true
-    let errorMsg = ''
-    const target = switchTarget || 'ide'
-    if (target === 'ide' || target === 'both') {
-      const result = await window.api.switchAccount(idePayload)
-      if (!result.success) {
-        success = false
-        errorMsg = result.error || ''
-      } else if (result.refreshedCredentials) {
-        // 同步 main 进程 refresh 后的最新 credentials 到 store，避免反代 store 留下已作废的 refreshToken
-        const rc = result.refreshedCredentials
-        useAccountsStore.setState((state) => {
-          const accounts = new Map(state.accounts)
-          const acc = accounts.get(account.id)
-          if (acc) {
-            accounts.set(account.id, {
-              ...acc,
-              credentials: {
-                ...acc.credentials,
-                accessToken: rc.accessToken,
-                refreshToken: rc.refreshToken,
-                expiresAt: Date.now() + rc.expiresIn * 1000
-              }
-            })
-          }
-          return { accounts }
-        })
-        useAccountsStore.getState().saveToStorage()
-      }
-    }
-    if (target === 'cli' || target === 'both') {
-      const result = await window.api.switchAccountCli(cliPayload)
-      if (!result.success && target === 'cli') { success = false; errorMsg = result.error || '' }
-    }
-
-    if (success) {
+    if (result.success) {
       setActiveAccount(account.id)
     } else {
-      alert(isEn ? `Switch failed: ${errorMsg}` : `切换失败：${errorMsg}`)
+      alert(isEn ? `Switch failed: ${result.error || ''}` : `切换失败：${result.error || ''}`)
     }
   }, [account, isEn, setActiveAccount])
 

@@ -184,7 +184,7 @@ interface KiroApi {
   onBackgroundCheckProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
   onBackgroundCheckResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
   
-  // 切换账号 - 写入凭证到本地 SSO 缓存
+  // 切换账号 - 按切号目标写入凭证（IDE 的 SSO 缓存 / kiro-cli 的 SQLite）
   switchAccount: (credentials: {
     accessToken: string
     refreshToken: string
@@ -197,9 +197,13 @@ interface KiroApi {
     profileArn?: string
     /** 反代 store 里的 account.id，用于 main 进程记忆 lastSwitchedAccountId 供 watcher 反向同步 */
     accountId?: string
+    /** 切号目标：ide=只写 IDE（默认），cli=只写 kiro-cli，both=两者 */
+    target?: 'ide' | 'cli' | 'both'
   }) => Promise<{
     success: boolean
     error?: string
+    /** CLI 切号实际写入的 data.sqlite3 路径（target 含 cli 时） */
+    cliDbPath?: string
     /** 切号前 main 进程会做一次 refresh；这是 OIDC 返回的最新凭证，renderer 应据此更新 store */
     refreshedCredentials?: {
       accessToken: string
@@ -233,18 +237,6 @@ interface KiroApi {
     leadTimeMinutes?: number
     error?: string
   }>
-
-  // 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
-  switchAccountCli: (credentials: {
-    accessToken: string
-    refreshToken: string
-    clientId?: string
-    clientSecret?: string
-    region?: string
-    profileArn?: string
-    provider?: string
-    scopes?: string[]
-  }) => Promise<{ success: boolean; error?: string; dbPath?: string }>
 
   // 退出登录 - 清除本地 SSO 缓存
   logoutAccount: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>

@@ -126,7 +126,7 @@ const api = {
     }
   },
 
-  // 切换账号 - 写入凭证到本地 SSO 缓存
+  // 切换账号 - 按切号目标写入凭证（IDE 的 SSO 缓存 / kiro-cli 的 SQLite）
   switchAccount: (credentials: {
     accessToken: string
     refreshToken: string
@@ -138,9 +138,13 @@ const api = {
     provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise'
     profileArn?: string
     accountId?: string
+    /** 切号目标：ide=只写 IDE（默认），cli=只写 kiro-cli，both=两者 */
+    target?: 'ide' | 'cli' | 'both'
   }): Promise<{
     success: boolean
     error?: string
+    /** CLI 切号实际写入的 data.sqlite3 路径（target 含 cli 时） */
+    cliDbPath?: string
     refreshedCredentials?: { accessToken: string; refreshToken: string; expiresIn: number }
   }> => {
     return ipcRenderer.invoke('switch-account', credentials)
@@ -163,20 +167,6 @@ const api = {
   },
   getProactiveRenewalEnabled: (): Promise<{ success: boolean; enabled: boolean; leadTimeMinutes?: number; error?: string }> => {
     return ipcRenderer.invoke('get-proactive-renewal-enabled')
-  },
-
-  // 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
-  switchAccountCli: (credentials: {
-    accessToken: string
-    refreshToken: string
-    clientId?: string
-    clientSecret?: string
-    region?: string
-    profileArn?: string
-    provider?: string
-    scopes?: string[]
-  }): Promise<{ success: boolean; error?: string; dbPath?: string }> => {
-    return ipcRenderer.invoke('switch-account-cli', credentials)
   },
 
   // 退出登录 - 清除本地 SSO 缓存

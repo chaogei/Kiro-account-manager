@@ -2159,56 +2159,51 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
       if (availableAccount) {
         console.log(`[AutoSwitch] Switching to: ${availableAccount.email}`)
-        setActiveAccount(availableAccount.id)
-        // 根据 switchTarget 设置决定切换目标
+        // 根据 switchTarget 设置决定切换目标；main 进程统一 refresh 一次，
+        // 避免 both 模式 IDE 轮换 refreshToken 后 CLI 再用旧 token 二次 refresh。
         const { switchTarget: target } = get()
         const creds = availableAccount.credentials
-        if (target === 'ide' || target === 'both') {
-          const switchResult = await window.api.switchAccount({
-            accessToken: creds.accessToken || '',
-            refreshToken: creds.refreshToken || '',
-            clientId: creds.clientId || '',
-            clientSecret: creds.clientSecret || '',
-            region: creds.region || 'us-east-1',
-            startUrl: creds.startUrl,
-            authMethod: creds.authMethod,
-            provider: creds.provider,
-            profileArn: (availableAccount as { profileArn?: string }).profileArn,
-            accountId: availableAccount.id
+        const switchResult = await window.api.switchAccount({
+          accessToken: creds.accessToken || '',
+          refreshToken: creds.refreshToken || '',
+          clientId: creds.clientId || '',
+          clientSecret: creds.clientSecret || '',
+          region: creds.region || 'us-east-1',
+          startUrl: creds.startUrl,
+          authMethod: creds.authMethod,
+          provider: creds.provider,
+          profileArn: (availableAccount as { profileArn?: string }).profileArn,
+          accountId: availableAccount.id,
+          target: target || 'ide'
+        })
+
+        // 把 main 进程 refresh 后的最新 credentials 同步回 store（无论成功与否，
+        // 轮换后的 refreshToken 都必须保存，否则下次 refresh 会拿作废 token）。
+        if (switchResult?.refreshedCredentials) {
+          const rc = switchResult.refreshedCredentials
+          set((state) => {
+            const accounts = new Map(state.accounts)
+            const acc = accounts.get(availableAccount.id)
+            if (acc) {
+              accounts.set(availableAccount.id, {
+                ...acc,
+                credentials: {
+                  ...acc.credentials,
+                  accessToken: rc.accessToken,
+                  refreshToken: rc.refreshToken,
+                  expiresAt: Date.now() + rc.expiresIn * 1000
+                }
+              })
+            }
+            return { accounts }
           })
-          // 把 main 进程 refresh 后的最新 credentials 同步回 store，
-          // 否则 store 里的 refreshToken 仍是 v1（已被服务端 rotate 作废），下次任何 refresh 都会失败
-          if (switchResult?.success && switchResult.refreshedCredentials) {
-            const rc = switchResult.refreshedCredentials
-            set((state) => {
-              const accounts = new Map(state.accounts)
-              const acc = accounts.get(availableAccount.id)
-              if (acc) {
-                accounts.set(availableAccount.id, {
-                  ...acc,
-                  credentials: {
-                    ...acc.credentials,
-                    accessToken: rc.accessToken,
-                    refreshToken: rc.refreshToken,
-                    expiresAt: Date.now() + rc.expiresIn * 1000
-                  }
-                })
-              }
-              return { accounts }
-            })
-            get().saveToStorage()
-          }
+          get().saveToStorage()
         }
-        if (target === 'cli' || target === 'both') {
-          window.api.switchAccountCli?.({
-            accessToken: creds.accessToken || '',
-            refreshToken: creds.refreshToken || '',
-            clientId: creds.clientId,
-            clientSecret: creds.clientSecret,
-            region: creds.region || 'us-east-1',
-            profileArn: (availableAccount as { profileArn?: string }).profileArn,
-            provider: creds.provider
-          }).catch(err => console.warn('[AutoSwitch CLI] Failed:', err))
+
+        if (switchResult?.success) {
+          setActiveAccount(availableAccount.id)
+        } else {
+          console.warn('[AutoSwitch] Switch failed:', switchResult?.error)
         }
       } else {
         console.log('[AutoSwitch] No available account to switch to')
