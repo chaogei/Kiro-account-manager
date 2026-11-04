@@ -389,6 +389,99 @@ export function buildKiroCliAuthRecords(input: KiroCliAuthInput): KiroCliAuthRec
   }
 }
 
+/**
+ * 检查 kiro-cli auth_kv 里「当前登录态」状态（只读、best-effort）。
+ *
+ * 判定结果用于决定 App 是否还能安全地覆盖 CLI 凭据：
+ *  - missing    : DB 文件不存在（CLI 未初始化/被删）→ 停止跟踪
+ *  - unreadable : DB 打不开（被 kiro-cli 占用/损坏）→ 本次跳过，但保留跟踪，下次再试
+ *  - empty      : DB 存在但没有该类型的 token（用户已登出 CLI）→ 停止跟踪
+ *  - present    : 有 token 记录，返回 access/refresh token 供调用者比对
+ */
+export type KiroCliTokenInspection =
+  | { status: 'missing' }
+  | { status: 'unreadable' }
+  | { status: 'empty' }
+  | { status: 'present'; accessToken?: string; refreshToken?: string }
+
+/** 根据账号类型选择 kiro-cli 的 token key（social vs odic） */
+export function kiroCliTokenKeyForAuth(input: { provider?: string; authMethod?: string }): 'idc' | 'social' {
+  return resolveKiroCliAuthMethod(input).isSocial ? 'social' : 'idc'
+}
+
+/**
+ * 并发 refresh 时判断新 token 是否比已同步的更新（expiresAt 更大）。
+ * 相等视为「不更新」，避免旧/同批 token 覆盖新 token。
+ */
+export function isNewerKiroCliTokenPair(input: {
+  trackedExpiresAtMs?: number
+  newExpiresAtMs: number
+}): boolean {
+  if (
+    typeof input.trackedExpiresAtMs !== 'number' ||
+    !Number.isFinite(input.trackedExpiresAtMs)
+  ) {
+    return true
+  }
+  return input.newExpiresAtMs > input.trackedExpiresAtMs
+}
+
+/**
+ * 只读探测 kiro-cli 当前 auth_kv 登录态。
+ * 用 read-only 连接 + 很短的 busy_timeout，避免在刷新路径上长时间阻塞。
+ */
+export async function inspectKiroCliAuthToken(
+  dbPath: string,
+  kind: 'idc' | 'social'
+): Promise<KiroCliTokenInspection> {
+  try {
+    const fsSync = await import('fs')
+    if (!fsSync.existsSync(dbPath)) return { status: 'missing' }
+  } catch {
+    return { status: 'unreadable' }
+  }
+  const key = kind === 'social' ? KIRO_CLI_SOCIAL_TOKEN_KEY : KIRO_CLI_IDC_TOKEN_KEY
+  try {
+    const { DatabaseSync } = (await import('node:sqlite')) as unknown as {
+      DatabaseSync: new (
+        path: string,
+        options?: { readOnly?: boolean; timeout?: number }
+      ) => {
+        prepare: (sql: string) => { get: (...params: unknown[]) => unknown }
+        exec: (sql: string) => void
+        close: () => void
+      }
+    }
+    const db = new DatabaseSync(dbPath, { readOnly: true, timeout: 1000 })
+    try {
+      try {
+        db.exec('PRAGMA busy_timeout = 500;')
+      } catch {
+        /* read-only pragma may be ignored */
+      }
+      const row = db.prepare('SELECT value FROM auth_kv WHERE key = ?').get(key) as
+        | { value?: string }
+        | undefined
+      if (!row?.value) return { status: 'empty' }
+      try {
+        const parsed = JSON.parse(row.value) as { access_token?: unknown; refresh_token?: unknown }
+        return {
+          status: 'present',
+          accessToken: typeof parsed.access_token === 'string' ? parsed.access_token : undefined,
+          refreshToken: typeof parsed.refresh_token === 'string' ? parsed.refresh_token : undefined
+        }
+      } catch {
+        // token 记录存在但 JSON 损坏 → 视为不可读，保留跟踪下次再试
+        return { status: 'unreadable' }
+      }
+    } finally {
+      db.close()
+    }
+  } catch {
+    return { status: 'unreadable' }
+  }
+}
+
 function sqlQuote(value: string): string {
   return value.replace(/'/g, "''")
 }

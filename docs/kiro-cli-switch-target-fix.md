@@ -87,7 +87,7 @@ kiro-cli 2.x 实际需要（以本机 CLI 自己写出的记录为准）：
 | `src/main/index.ts` | 合并 `switch-account` / `switch-account-cli`：按 `target`（ide/cli/both）**只 refresh 一次**，写 IDE 和/或 CLI，失败显式返回错误并回传 rotated credentials |
 | `src/preload/index.ts`、`index.d.ts` | `switchAccount` 增加 `target` / `cliDbPath` 类型；移除已废弃的 `switchAccountCli` |
 | `src/renderer/.../AccountCard.tsx`、`AccountListRow.tsx`、`store/accounts.ts` | 单次 IPC 调用；success/failure 都把 rotated token 落回 store；both 模式 CLI 失败会提示用户；auto-switch 改为 await 并同步错误 |
-| `test/cli-switch/kiroCliAuth.test.ts`（新增） | 17 个 node:test 用例：三平台路径、social/IdC 判定、start_url/client_secret 过期时间推导、token/registration 必填字段、竞争 key 清理、SQLite 写入 round-trip、CLI 未初始化错误 |
+| `test/cli-switch/kiroCliAuth.test.ts`（新增） | 21 个 node:test 用例：三平台路径、social/IdC 判定、start_url/client_secret 过期时间推导、token/registration 必填字段、竞争 key 清理、SQLite 写入 round-trip、CLI 未初始化错误、tracked-sync 判定、只读探针状态（missing/empty/present/unreadable） |
 
 ## 验证
 
@@ -96,7 +96,7 @@ kiro-cli 2.x 实际需要（以本机 CLI 自己写出的记录为准）：
 ```bash
 cd Kiro-account-manager
 node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/cli-switch/
-# → 17 pass / 0 fail
+# → 21 pass / 0 fail
 npm run typecheck   # → exit 0
 ```
 
@@ -126,6 +126,9 @@ npm run typecheck   # → exit 0
    - 手动刷新（`refresh-account-token`）；
    - 后台批量刷新（`background-batch-refresh`）；
    - IDE 自己 refresh 写入 token 文件后的反向同步（fs.watch）。
+   安全约束：同步前会只读检查 CLI 当前登录态 —— 如果用户手动 `kiro-cli login`/参考脚本
+   换成了别的账号（refreshToken 不一致）、CLI 已登出、或 CLI 数据库被删除，会**停止跟踪**
+   而不会覆盖用户自己的登录；之后只有再做一次「切号目标含 CLI」的切号才会重新接管。
    仍未覆盖：反向代理自己的内存内刷新（不落盘）；以及 CLI 自己 refresh 后 App store 里
    可能留下旧 RT（共享 registration 的双 rotator 问题）。
 2. **两个 rotator 共存**：IDE 与 CLI 共享同一 client registration / refresh token 族，

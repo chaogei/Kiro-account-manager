@@ -23,6 +23,9 @@ import { test } from 'node:test'
 import {
   applyKiroCliAuth,
   buildKiroCliAuthRecords,
+  inspectKiroCliAuthToken,
+  isNewerKiroCliTokenPair,
+  kiroCliTokenKeyForAuth,
   clientSecretExpiresAtFromClientSecret,
   KIRO_CLI_DEVICE_REGISTRATION_KEY,
   KIRO_CLI_IDC_TOKEN_KEY,
@@ -276,6 +279,65 @@ test('social 缺少 profileArn 时报错（CLI 会把无 profile ARN 的 social 
     () => buildKiroCliAuthRecords(idcInput({ provider: 'Github', authMethod: 'social', profileArn: undefined })),
     /profileArn/
   )
+})
+
+// ============ App 主动 refresh 时的 CLI 同步判定 / 只读探针 ============
+
+test('token key 按账号类型选择（social → kirocli:social:token，否则 odic）', () => {
+  assert.equal(kiroCliTokenKeyForAuth({ provider: 'Github', authMethod: 'social' }), 'social')
+  assert.equal(kiroCliTokenKeyForAuth({ provider: 'google' }), 'social')
+  assert.equal(kiroCliTokenKeyForAuth({ provider: 'Enterprise', authMethod: 'IdC' }), 'idc')
+  assert.equal(kiroCliTokenKeyForAuth({ provider: 'BuilderId' }), 'idc')
+})
+
+test('freshness guard：只接受 expiries 更晚的 token（并发 refresh 防旧值覆盖新值）', () => {
+  assert.equal(isNewerKiroCliTokenPair({ newExpiresAtMs: 2000 }), true)
+  assert.equal(isNewerKiroCliTokenPair({ trackedExpiresAtMs: 1000, newExpiresAtMs: 2000 }), true)
+  assert.equal(isNewerKiroCliTokenPair({ trackedExpiresAtMs: 2000, newExpiresAtMs: 2000 }), false)
+  assert.equal(isNewerKiroCliTokenPair({ trackedExpiresAtMs: 2000, newExpiresAtMs: 1000 }), false)
+  assert.equal(isNewerKiroCliTokenPair({ trackedExpiresAtMs: Number.NaN, newExpiresAtMs: 1000 }), true)
+})
+
+test('inspectKiroCliAuthToken：missing / empty / present / unreadable 状态区分', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, 'data.sqlite3')
+
+    // DB 不存在
+    assert.deepEqual(await inspectKiroCliAuthToken(dbPath, 'idc'), { status: 'missing' })
+
+    // DB 存在但没有 token 记录（用户登出 CLI）
+    await writeKiroCliAuthRecords(dbPath, {
+      isSocial: false,
+      providerForCli: 'BuilderId',
+      tokenKey: 'unused-key',
+      tokenValue: '{}',
+      staleKeys: [],
+      removeRegistration: false
+    })
+    assert.deepEqual(await inspectKiroCliAuthToken(dbPath, 'idc'), { status: 'empty' })
+
+    // 有 token 记录：返回 access/refresh token 供 ownership 比对
+    const records = buildKiroCliAuthRecords(idcInput())
+    await writeKiroCliAuthRecords(dbPath, records)
+    const idc = await inspectKiroCliAuthToken(dbPath, 'idc')
+    assert.equal(idc.status, 'present')
+    assert.equal(idc.status === 'present' && idc.refreshToken, 'refresh-token')
+    // 查 social key 时该 DB 只有 odic 记录 → empty
+    assert.deepEqual(await inspectKiroCliAuthToken(dbPath, 'social'), { status: 'empty' })
+
+    // token JSON 损坏 → unreadable（保留跟踪，下次再试，而不是误判成外部换号）
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(dbPath)
+    try {
+      db.prepare('INSERT OR REPLACE INTO auth_kv (key, value) VALUES (?, ?)').run(
+        KIRO_CLI_IDC_TOKEN_KEY,
+        'not-json'
+      )
+    } finally {
+      db.close()
+    }
+    assert.deepEqual(await inspectKiroCliAuthToken(dbPath, 'idc'), { status: 'unreadable' })
+  })
 })
 
 // ============ SQLite 写入 ============

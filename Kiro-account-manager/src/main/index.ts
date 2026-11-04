@@ -28,7 +28,11 @@ import {
 import {
   applyKiroCliAuth,
   buildKiroCliAuthRecords,
+  inspectKiroCliAuthToken,
+  isNewerKiroCliTokenPair,
+  kiroCliTokenKeyForAuth,
   resolveKiroCliAuthMethod,
+  resolveKiroCliPaths,
   shouldSyncTrackedKiroCliAuth
 } from './kiroCliAuth'
 import { openaiToKiro } from './proxy/translator'
@@ -1475,7 +1479,21 @@ async function initStore(): Promise<void> {
       typeof restored.refreshToken === 'string' &&
       typeof restored.region === 'string'
     ) {
-      kiroCliTrackedAuth = restored
+      kiroCliTrackedAuth = {
+        accountId: restored.accountId,
+        accessToken: restored.accessToken,
+        refreshToken: restored.refreshToken,
+        region: restored.region,
+        ...(typeof restored.startUrl === 'string' ? { startUrl: restored.startUrl } : {}),
+        ...(typeof restored.provider === 'string' ? { provider: restored.provider } : {}),
+        ...(typeof restored.authMethod === 'string' ? { authMethod: restored.authMethod } : {}),
+        ...(typeof restored.clientId === 'string' ? { clientId: restored.clientId } : {}),
+        ...(typeof restored.clientSecret === 'string' ? { clientSecret: restored.clientSecret } : {}),
+        ...(typeof restored.profileArn === 'string' ? { profileArn: restored.profileArn } : {}),
+        ...(typeof restored.expiresAtMs === 'number' && Number.isFinite(restored.expiresAtMs)
+          ? { expiresAtMs: restored.expiresAtMs }
+          : {})
+      }
       console.log('[KiroCLI] Restored tracked CLI account:', restored.accountId)
     }
   } catch (e) {
@@ -1906,6 +1924,8 @@ interface KiroCliTrackedAuth {
   accessToken: string
   refreshToken: string
   region: string
+  /** 最近一次同步给 CLI 的 token 过期时间（epoch ms），用于拒绝更旧的并发 refresh 结果 */
+  expiresAtMs?: number
   startUrl?: string
   provider?: string
   authMethod?: string
@@ -1914,6 +1934,8 @@ interface KiroCliTrackedAuth {
   profileArn?: string
 }
 let kiroCliTrackedAuth: KiroCliTrackedAuth | null = null
+/** CLI DB 暂时不可读的告警只打一次，避免刷新路径刷屏 */
+let kiroCliOwnershipWarned = false
 
 /** 当前「切号目标」设置（以 renderer 通过 save-accounts 持久化的 accountData 为准） */
 function getKiroCliSwitchTarget(): 'ide' | 'cli' | 'both' {
@@ -1927,8 +1949,74 @@ function getKiroCliSwitchTarget(): 'ide' | 'cli' | 'both' {
 }
 
 /**
+ * 读取 store 里某账号最新的认证字段（用户重新登录/换 region 后 client registration 可能变化）。
+ * 只读、best-effort：读不到就退回 switch 时的快照。
+ */
+function readTrackedAccountAuthFields(accountId: string): {
+  found: boolean
+  fields: Partial<KiroCliTrackedAuth>
+} {
+  try {
+    const accountData = store?.get('accountData') as
+      | {
+          accounts?: Record<
+            string,
+            {
+              profileArn?: string
+              credentials?: {
+                region?: string
+                startUrl?: string
+                provider?: string
+                authMethod?: string
+                clientId?: string
+                clientSecret?: string
+                profileArn?: string
+              }
+            }
+          >
+        }
+      | undefined
+    if (!accountData) return { found: true, fields: {} } // store 尚未就绪：退回快照
+    const account = accountData.accounts?.[accountId]
+    if (!account) return { found: false, fields: {} }
+    const fields: Partial<KiroCliTrackedAuth> = {}
+    const c = account.credentials
+    if (c) {
+      if (typeof c.region === 'string' && c.region) fields.region = c.region
+      if (typeof c.startUrl === 'string' && c.startUrl) fields.startUrl = c.startUrl
+      if (typeof c.provider === 'string' && c.provider) fields.provider = c.provider
+      if (typeof c.authMethod === 'string' && c.authMethod) fields.authMethod = c.authMethod
+      if (typeof c.clientId === 'string' && c.clientId) fields.clientId = c.clientId
+      if (typeof c.clientSecret === 'string' && c.clientSecret) fields.clientSecret = c.clientSecret
+      if (typeof c.profileArn === 'string' && c.profileArn) fields.profileArn = c.profileArn
+    }
+    if (!fields.profileArn && typeof account.profileArn === 'string' && account.profileArn) {
+      fields.profileArn = account.profileArn
+    }
+    return { found: true, fields }
+  } catch {
+    // store 读取异常：当作账号仍存在，只用 switch 时的快照（不因此停止跟踪）
+    return { found: true, fields: {} }
+  }
+}
+
+/** 停止跟踪 CLI 账号（例如用户自己重新登录了 kiro-cli，或 CLI 数据库被删除） */
+function clearKiroCliTracking(reason: string): void {
+  if (!kiroCliTrackedAuth) return
+  console.log('[KiroCLI] Stop syncing tracked CLI account:', reason)
+  kiroCliTrackedAuth = null
+  persistKiroCliTracking()
+}
+
+/**
  * App 主动刷新 token 后，若本次刷新的账号正是「最近一次成功切到 CLI 的账号」，
  * 把新的 access/refresh token 也写进 kiro-cli 的 auth_kv（best-effort，绝不影响主刷新流程）。
+ *
+ * 安全约束：
+ *  - 只覆盖「CLI 登录态仍归本 App 管理」的账号：CLI DB 里的 refreshToken 必须与跟踪值一致；
+ *    用户手动 `kiro-cli login` / 脚本换了账号时跳过并停止跟踪，绝不覆盖用户自己的登录。
+ *  - 并发 refresh 只写更新的 token（按 expiresAt 比较），避免旧 token 后到覆盖新 token。
+ *  - 每次同步前从 store 合并账号最新认证字段，避免旧的 client registration 写进 CLI。
  */
 async function maybeSyncTrackedKiroCliAuth(
   accountId: string | undefined,
@@ -1945,25 +2033,89 @@ async function maybeSyncTrackedKiroCliAuth(
   ) {
     return
   }
+
+  const expiresIn = refreshed.expiresIn && refreshed.expiresIn > 0 ? refreshed.expiresIn : 3600
+  const newExpiresAtMs = Date.now() + expiresIn * 1000
+  // N13：并发 refresh 时只用「更新」的 token 覆盖，相等也视为不覆盖。
+  if (!isNewerKiroCliTokenPair({ trackedExpiresAtMs: tracked.expiresAtMs, newExpiresAtMs })) {
+    return
+  }
+
+  // N15：合并 store 里该账号最新的非 token 字段；如果账号已被删除则停止跟踪。
+  const latest = readTrackedAccountAuthFields(tracked.accountId)
+  if (!latest.found) {
+    clearKiroCliTracking('tracked account no longer exists in store')
+    return
+  }
+  const auth = { ...tracked, ...latest.fields }
+
+  let dbPath: string
+  try {
+    dbPath = resolveKiroCliPaths().dbPath
+  } catch {
+    return
+  }
+
+  // N14/N18：只有 CLI 登录态仍归本 App 管理时才覆盖。
+  const kind = kiroCliTokenKeyForAuth({ provider: auth.provider, authMethod: auth.authMethod })
+  const inspection = await inspectKiroCliAuthToken(dbPath, kind)
+  if (inspection.status === 'unreadable') {
+    // 只是暂时读不到（被 CLI 占用/损坏）：跳过本次但保留跟踪，绝不因此永久关闭同步。
+    if (!kiroCliOwnershipWarned) {
+      kiroCliOwnershipWarned = true
+      console.warn('[KiroCLI] CLI database temporarily unreadable, skip this sync (tracking kept)')
+    }
+    return
+  }
+  kiroCliOwnershipWarned = false
+  if (inspection.status === 'missing') {
+    clearKiroCliTracking('kiro-cli database is missing')
+    return
+  }
+  if (inspection.status === 'empty') {
+    clearKiroCliTracking('kiro-cli is logged out (no token record)')
+    return
+  }
+  if (inspection.refreshToken && inspection.refreshToken !== tracked.refreshToken) {
+    clearKiroCliTracking('kiro-cli was re-logged-in outside the app (refresh token mismatch)')
+    return
+  }
+
+  // N13：乐观占位 —— 在 await 写入之前先提升 expiresAtMs，避免两个并发 sync 同时通过新旧判断。
+  const previousExpiresAtMs = tracked.expiresAtMs
+  tracked.expiresAtMs = newExpiresAtMs
   try {
     const records = buildKiroCliAuthRecords({
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken,
-      expiresAtIso: new Date(Date.now() + (refreshed.expiresIn && refreshed.expiresIn > 0 ? refreshed.expiresIn : 3600) * 1000).toISOString(),
-      region: tracked.region,
-      startUrl: tracked.startUrl,
-      provider: tracked.provider,
-      authMethod: tracked.authMethod,
-      clientId: tracked.clientId,
-      clientSecret: tracked.clientSecret,
-      profileArn: tracked.profileArn
+      expiresAtIso: new Date(newExpiresAtMs).toISOString(),
+      region: auth.region,
+      startUrl: auth.startUrl,
+      provider: auth.provider,
+      authMethod: auth.authMethod,
+      clientId: auth.clientId,
+      clientSecret: auth.clientSecret,
+      profileArn: auth.profileArn
     })
-    const { dbPath } = await applyKiroCliAuth(records)
+    const applied = await applyKiroCliAuth(records, { dbPath })
     tracked.accessToken = refreshed.accessToken
     tracked.refreshToken = refreshed.refreshToken
+    if (latest.fields.region) tracked.region = latest.fields.region
+    if (latest.fields.startUrl) tracked.startUrl = latest.fields.startUrl
+    if (latest.fields.provider) tracked.provider = latest.fields.provider
+    if (latest.fields.authMethod) tracked.authMethod = latest.fields.authMethod
+    if (latest.fields.clientId) tracked.clientId = latest.fields.clientId
+    if (latest.fields.clientSecret) tracked.clientSecret = latest.fields.clientSecret
+    if (latest.fields.profileArn) tracked.profileArn = latest.fields.profileArn
     persistKiroCliTracking()
-    console.log(`[KiroCLI] Synced refreshed token to kiro-cli for tracked account ${tracked.accountId} (${dbPath})`)
+    console.log(
+      `[KiroCLI] Synced refreshed token to kiro-cli for tracked account ${tracked.accountId} (${applied.dbPath})`
+    )
   } catch (error) {
+    // 失败时回滚占位（仅当没有其它更新的 sync 已经推进过 expiresAtMs）
+    if (tracked.expiresAtMs === newExpiresAtMs) {
+      tracked.expiresAtMs = previousExpiresAtMs
+    }
     console.warn(
       '[KiroCLI] Failed to sync refreshed token to kiro-cli (best-effort):',
       error instanceof Error ? error.message : error
@@ -3134,13 +3286,6 @@ app.whenReady().then(async () => {
       const newRefresh = refreshResult.refreshToken || refreshToken
       const expiresIn = refreshResult.expiresIn ?? 3600
 
-      // 若该账号是「最近成功切到 CLI 的账号」，把轮换后的 token 同步进 kiro-cli 数据库
-      await maybeSyncTrackedKiroCliAuth(account.id, {
-        accessToken: newAccess,
-        refreshToken: newRefresh,
-        expiresIn
-      })
-
       // bug B 修复：仅当该账号是 Kiro IDE 当前激活账号时，同步写入磁盘 token 文件
       // 判定优先级（任一命中即视为"是当前激活账号"）：
       //   1) 磁盘 token 的 refreshToken === renderer 传入的 account.credentials.refreshToken（最准）
@@ -3189,6 +3334,14 @@ app.whenReady().then(async () => {
         syncSkipReason = `磁盘同步异常：${e instanceof Error ? e.message : String(e)}`
         console.warn('[Refresh] Failed to sync token to IDE:', e)
       }
+
+      // N17：CLI 同步放在 IDE 写盘之后（无论 IDE 写盘成功/跳过/抛错都会执行），
+      // 这样 CLI 数据库被占用最多只会延迟 CLI 写入，不会延迟 IDE token 文件更新。
+      await maybeSyncTrackedKiroCliAuth(account.id, {
+        accessToken: newAccess,
+        refreshToken: newRefresh,
+        expiresIn
+      })
 
       // 刷新后自动获取 profileArn（仅 Enterprise 需要调 API，其他类型不调）
       let resolvedEnterpriseArn: string | undefined
@@ -3820,15 +3973,6 @@ app.whenReady().then(async () => {
               newRefreshToken = refreshResult.refreshToken || refreshToken
               newExpiresIn = refreshResult.expiresIn
 
-              // 若该账号是「最近成功切到 CLI 的账号」，同步 kiro-cli 数据库（best-effort）
-              if (newAccessToken && newRefreshToken) {
-                await maybeSyncTrackedKiroCliAuth(account.id, {
-                  accessToken: newAccessToken,
-                  refreshToken: newRefreshToken,
-                  expiresIn: newExpiresIn ?? 3600
-                })
-              }
-
               // 仅当该账号是 Kiro IDE 当前激活账号时，同步新 token 到磁盘 token 文件。
               // 否则 IDE 在 ~50min 后会用磁盘上"被自动刷新作废"的旧 refreshToken 调 OIDC → 401 → logoutAndForget。
               // 判定优先级（任一命中）：1) 磁盘 refresh 匹配账号  2) lastSwitchedAccountId 匹配
@@ -3867,6 +4011,15 @@ app.whenReady().then(async () => {
                 } catch (e) {
                   console.warn(`[BackgroundRefresh] sync to IDE failed for ${account.id}:`, e)
                 }
+              }
+
+              // N17：IDE 写盘之后再同步 CLI（best-effort）；CLI 数据库被占用也不会拖延 IDE 更新
+              if (newAccessToken && newRefreshToken) {
+                await maybeSyncTrackedKiroCliAuth(account.id, {
+                  accessToken: newAccessToken,
+                  refreshToken: newRefreshToken,
+                  expiresIn: newExpiresIn ?? 3600
+                })
               }
             }
 
@@ -5026,6 +5179,7 @@ app.whenReady().then(async () => {
               accessToken: finalAccessToken,
               refreshToken: finalRefreshToken,
               region,
+              expiresAtMs: Date.now() + finalExpiresIn * 1000,
               startUrl,
               provider,
               authMethod,
