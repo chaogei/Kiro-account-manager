@@ -1976,8 +1976,9 @@ function readTrackedAccountAuthFields(accountId: string): {
           >
         }
       | undefined
-    if (!accountData) return { found: true, fields: {} } // store 尚未就绪：退回快照
-    const account = accountData.accounts?.[accountId]
+    // store 尚未就绪 / 旧数据结构（没有 accounts 映射）时退回快照，不要误判为账号已删除
+    if (!accountData || !accountData.accounts) return { found: true, fields: {} }
+    const account = accountData.accounts[accountId]
     if (!account) return { found: false, fields: {} }
     const fields: Partial<KiroCliTrackedAuth> = {}
     const c = account.credentials
@@ -2002,6 +2003,7 @@ function readTrackedAccountAuthFields(accountId: string): {
 
 /** 停止跟踪 CLI 账号（例如用户自己重新登录了 kiro-cli，或 CLI 数据库被删除） */
 function clearKiroCliTracking(reason: string): void {
+  kiroCliOwnershipWarned = false
   if (!kiroCliTrackedAuth) return
   console.log('[KiroCLI] Stop syncing tracked CLI account:', reason)
   kiroCliTrackedAuth = null
@@ -2059,6 +2061,8 @@ async function maybeSyncTrackedKiroCliAuth(
   // N14/N18：只有 CLI 登录态仍归本 App 管理时才覆盖。
   const kind = kiroCliTokenKeyForAuth({ provider: auth.provider, authMethod: auth.authMethod })
   const inspection = await inspectKiroCliAuthToken(dbPath, kind)
+  // N19：只读探测期间可能发生了新的切号/跟踪重置，此时不要再用旧 tracked 的值覆盖。
+  if (kiroCliTrackedAuth !== tracked) return
   if (inspection.status === 'unreadable') {
     // 只是暂时读不到（被 CLI 占用/损坏）：跳过本次但保留跟踪，绝不因此永久关闭同步。
     if (!kiroCliOwnershipWarned) {
@@ -2076,7 +2080,13 @@ async function maybeSyncTrackedKiroCliAuth(
     clearKiroCliTracking('kiro-cli is logged out (no token record)')
     return
   }
-  if (inspection.refreshToken && inspection.refreshToken !== tracked.refreshToken) {
+  // N20：token 记录存在但无法读出 refresh_token 时无法证明所有权，按“不可验证”停止跟踪，
+  // 避免在未确认的情况下覆盖 CLI 登录。
+  if (!inspection.refreshToken) {
+    clearKiroCliTracking('kiro-cli token record has no readable refresh token')
+    return
+  }
+  if (inspection.refreshToken !== tracked.refreshToken) {
     clearKiroCliTracking('kiro-cli was re-logged-in outside the app (refresh token mismatch)')
     return
   }
@@ -2097,7 +2107,11 @@ async function maybeSyncTrackedKiroCliAuth(
       clientSecret: auth.clientSecret,
       profileArn: auth.profileArn
     })
-    const applied = await applyKiroCliAuth(records, { dbPath })
+    // N23：不传显式 dbPath，让 applyKiroCliAuth 重新确认数据库仍存在，避免在探测后被删除时
+    // 新建一个缺少 CLI migrations 的裸数据库。
+    const applied = await applyKiroCliAuth(records)
+    // N19：await 期间若跟踪目标已被新的切号替换，不要写旧 tracked 的状态。
+    if (kiroCliTrackedAuth !== tracked) return
     tracked.accessToken = refreshed.accessToken
     tracked.refreshToken = refreshed.refreshToken
     if (latest.fields.region) tracked.region = latest.fields.region
@@ -2112,8 +2126,8 @@ async function maybeSyncTrackedKiroCliAuth(
       `[KiroCLI] Synced refreshed token to kiro-cli for tracked account ${tracked.accountId} (${applied.dbPath})`
     )
   } catch (error) {
-    // 失败时回滚占位（仅当没有其它更新的 sync 已经推进过 expiresAtMs）
-    if (tracked.expiresAtMs === newExpiresAtMs) {
+    // 失败时回滚占位（仅当跟踪目标未被替换、且没有其它更新的 sync 推进过 expiresAtMs）
+    if (kiroCliTrackedAuth === tracked && tracked.expiresAtMs === newExpiresAtMs) {
       tracked.expiresAtMs = previousExpiresAtMs
     }
     console.warn(
@@ -5187,6 +5201,7 @@ app.whenReady().then(async () => {
               clientSecret,
               profileArn: resolvedProfileArn
             }
+            kiroCliOwnershipWarned = false
             persistKiroCliTracking()
           }
         } catch (error) {
