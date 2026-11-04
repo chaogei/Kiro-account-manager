@@ -108,7 +108,13 @@ export interface KiroCliAuthMethodInput {
 
 export interface KiroCliAuthMethod {
   isSocial: boolean
-  /** kiro-cli SocialToken 期望的 provider 大小写：Google / Github */
+  /**
+   * kiro-cli SocialToken 序列化枚举值：小写 `google` / `github`。
+   *
+   * 写成 `Google` / `Github` 也能登录（CLI 会打印
+   * `unknown variant `Github`, expected `google` or `github`` 的 serde warning），
+   * 但 CLI 自己写出的记录用的小写，因此这里统一小写，避免任何严格解析路径告警。
+   */
   providerForCli: string
   /** 传给 kiro-cli token record 的 oauth_flow 值 */
   oauthFlow: string
@@ -130,7 +136,7 @@ export function resolveKiroCliAuthMethod(input: KiroCliAuthMethodInput): KiroCli
   if (isSocial) {
     return {
       isSocial: true,
-      providerForCli: providerNorm === 'github' ? 'Github' : 'Google',
+      providerForCli: providerNorm === 'github' ? 'github' : 'google',
       oauthFlow: KIRO_CLI_OAUTH_FLOW
     }
   }

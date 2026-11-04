@@ -113,14 +113,14 @@ test('IdC 账号判定（BuilderId / Enterprise）', () => {
   assert.equal(resolveKiroCliAuthMethod({ provider: 'Enterprise', authMethod: 'IdC' }).isSocial, false)
 })
 
-test('social 判定不区分大小写，并归一化 provider 大小写', () => {
+test('social 判定不区分大小写，并归一化为 CLI 序列化用的小写 provider', () => {
   assert.deepEqual(resolveKiroCliAuthMethod({ provider: 'google' }), {
     isSocial: true,
-    providerForCli: 'Google',
+    providerForCli: 'google',
     oauthFlow: 'Pkce'
   })
-  assert.equal(resolveKiroCliAuthMethod({ provider: 'GitHub' }).providerForCli, 'Github')
-  assert.equal(resolveKiroCliAuthMethod({ provider: 'Github' }).providerForCli, 'Github')
+  assert.equal(resolveKiroCliAuthMethod({ provider: 'GitHub' }).providerForCli, 'github')
+  assert.equal(resolveKiroCliAuthMethod({ provider: 'Github' }).providerForCli, 'github')
   // 只有 authMethod、没有 provider 的导入路径也要识别为 social
   assert.equal(resolveKiroCliAuthMethod({ authMethod: 'social' }).isSocial, true)
 })
@@ -227,7 +227,7 @@ test('social token 记录包含 provider / profile_arn，并清除 IdC registrat
   )
   assert.equal(records.tokenKey, KIRO_CLI_SOCIAL_TOKEN_KEY)
   const token = JSON.parse(records.tokenValue) as Record<string, unknown>
-  assert.equal(token.provider, 'Google')
+  assert.equal(token.provider, 'google')
   assert.equal(token.profile_arn, 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK')
   assert.equal(token.access_token, 'access-token')
   assert.equal(token.refresh_token, 'refresh-token')
